@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Research
+benchmark/data/*
+benchmark/results/*
+model_save/
