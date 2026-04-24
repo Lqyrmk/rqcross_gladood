@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch_scatter
 
 from .bwgnn import BWGNN
+from .attention import CrossAttention
 from torch_geometric.utils import subgraph
 from torch.nn import Sequential, Linear, ReLU
 from torch_geometric.nn import GINConv, global_add_pool, global_mean_pool, global_max_pool
@@ -22,6 +23,8 @@ class CROSS(nn.Module):
                  mask_threshold=0.4,
                  eps=0.001,
                  scalar=20,
+                 k=10,
+                 num_heads=5,
                  explainer_model='gin',
                  explainer_layers=5,
                  explainer_readout='add',
@@ -43,6 +46,16 @@ class CROSS(nn.Module):
 
         self.bwgnn_encoder = BWGNN(in_dim, self.emb_dim, self.emb_dim)
         self.gin_encoder = GIN(in_dim, hid_dim, num_layers, pooling, readout)
+
+        self.k = k
+        self.num_heads = num_heads
+        self.prototype_codebooks = nn.Parameter(torch.rand(self.k, self.emb_dim))
+
+        self.cross_attn_low = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
+        self.cross_attn_high = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
+
+        self.norm_low = nn.LayerNorm(self.emb_dim)
+        self.norm_high = nn.LayerNorm(self.emb_dim)
 
         self.init_emb()
 
@@ -73,32 +86,54 @@ class CROSS(nn.Module):
             raise ValueError("Pooling Name <{}> is Unknown".format(self.pooling))
         return pool
 
+    def allocate_prototype(self, x):
+        # x: [N, D]
+        # codebook: [K, D]
+        sim = x @ self.prototype_codebooks.T  # [N, K]
+        labels = sim.argmax(dim=1)  # [N,]
+        p = self.prototype_codebooks[labels]  # [N, D]
+        return p
+
 
     def forward(self, data):
 
         x, edge_index, batch, num_graphs, num_nodes = data.x, data.edge_index, data.batch, data.num_graphs, data.num_nodes
 
-        n_v_1 = self.bwgnn_encoder(x, edge_index)  # [n, md]
-        g_v_1 = self.pool(n_v_1, batch)  # [g, md]
-        g_v_2, n_v_2 = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
+        n_v_h = self.bwgnn_encoder(x, edge_index)  # [n, md]
+        g_v_h = self.pool(n_v_h, batch)  # [g, md]
 
-        return g_v_1, g_v_2
+        g_v_l, n_v_l = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
+
+        high_g = self.cross_attn_high(g_v_h, self.prototype_codebooks, self.prototype_codebooks)
+        low_g = self.cross_attn_low(g_v_l, self.prototype_codebooks, self.prototype_codebooks)
+
+        high_g = self.norm_high(high_g)
+        low_g = self.norm_low(low_g)
+
+        high_p = self.allocate_prototype(high_g)
+        low_p = self.allocate_prototype(low_g)
+
+        return high_g, low_g, high_p, low_p
 
     def loss_func(self, emb_list, batch, t):
 
-        g_v_1, g_v_2 = emb_list
+        high_g, low_g, high_p, low_p = emb_list
 
-        loss = self.calc_gcl_loss_g(g_v_1, g_v_2, t)
+        loss_ii = self.calc_gcl_loss_g(high_g, low_g, t)
+        loss_pp = self.calc_gcl_loss_g(high_p, low_p, t)
+        loss_ip = self.calc_gcl_loss_g(high_g, high_p, t) + self.calc_gcl_loss_g(low_g, low_p, t)
 
-        return loss
+        return loss_ii, loss_pp, loss_ip
 
     def score_func(self, emb_list, batch, t):
 
-        g_v_1, g_v_2 = emb_list
+        high_g, low_g, high_p, low_p = emb_list
 
-        score = self.calc_gcl_loss_g(g_v_1, g_v_2, t)
+        score_ii = self.calc_gcl_loss_g(high_g, low_g, t)
+        score_pp = self.calc_gcl_loss_g(high_p, low_p, t)
+        score_ip = self.calc_gcl_loss_g(high_g, high_p, t) + self.calc_gcl_loss_g(low_g, low_p, t)
 
-        return score
+        return score_ii, score_pp, score_ip
 
     @staticmethod
     def calc_gcl_loss_n(x, x_aug, batch, temperature=0.2):

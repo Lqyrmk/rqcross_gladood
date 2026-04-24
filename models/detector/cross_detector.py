@@ -21,6 +21,8 @@ class CrossDetector:
         self.dropout = config.dropout
         self.eps = config.eps
         self.scalar = config.scalar
+        self.k = config.k
+        self.num_heads = config.num_heads
         self.pooling = config.pooling
         self.readout = config.readout
 
@@ -34,11 +36,13 @@ class CrossDetector:
             in_dim=self.in_dim,
             hid_dim=self.hid_dim,
             num_layers=self.num_layers,
-            dropout = self.dropout,
-            eps = self.eps,
-            scalar = self.scalar,
-            pooling = self.pooling,
-            readout = self.readout
+            dropout=self.dropout,
+            eps=self.eps,
+            scalar=self.scalar,
+            k=self.k,
+            num_heads=self.num_heads,
+            pooling=self.pooling,
+            readout=self.readout
         ).to(self.device)
 
 
@@ -56,8 +60,8 @@ class CrossDetector:
                 data = data.to(self.device)
                 optimizer.zero_grad()
                 emb = model(data)
-                l = model.loss_func(emb, data.batch, self.temperature)
-                loss = l.mean()
+                loss_ii, loss_pp, loss_ip = model.loss_func(emb, data.batch, self.temperature)
+                loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean()
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item() * data.num_graphs
@@ -68,8 +72,9 @@ class CrossDetector:
                 for data in dataloader_val:
                     data = data.to(self.device)
                     emb = model(data)
-                    s = model.score_func(emb, data.batch, self.temperature)
-                    score.extend( s.cpu().tolist() )
+                    s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
+                    # score.extend( s.cpu().tolist() )
+                    score.extend( (s_ii + s_pp + s_ip).cpu().tolist() )
                     y.extend(data.y.cpu().tolist())
 
                 auc = ood_auc(y, score)
@@ -79,8 +84,10 @@ class CrossDetector:
                     torch.save(model, os.path.join(self.path,'model.pth'))
                 else:
                     counter +=1
-
-                if counter >= patience: break
+                print(f"[Epoch {epoch:03d}] Val AUC: {auc:.4f} | Best: {self.max_auc:.4f}")
+                if counter >= patience or self.max_auc > 0.999:
+                    print(f"Early stop triggered.")
+                    break
 
     def predict(self, dataloader):
         model = torch.load(os.path.join(self.path,'model.pth'))
@@ -91,8 +98,9 @@ class CrossDetector:
             for data in dataloader:
                 data = data.to(self.device)
                 emb = model(data)
-                s = model.score_func(emb, data.batch, self.temperature)
-                score.extend( s.cpu().tolist() )
+                s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
+                # score.extend( s.cpu().tolist() )
+                score.extend( (s_ii + s_pp + s_ip).cpu().tolist() )
                 y.extend(data.y.cpu().tolist())
 
         return score, y

@@ -29,6 +29,8 @@ class Config:
     dropout: float = 0.1
     eps: float = 0.001
     scalar: float = 20
+    k: int = 10
+    num_heads: int = 5
     pooling: str = 'mean'
     readout: str = 'concat'
 
@@ -36,7 +38,7 @@ class Config:
     batch_size: int = 128
     batch_size_test: int = 9999
     lr: float = 0.001
-    num_epoch: int = 200
+    num_epoch: int = 300
     num_trial: int = 5
     eval_freq: int = 5
     alpha: float = 1.0
