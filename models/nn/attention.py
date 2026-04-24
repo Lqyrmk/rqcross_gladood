@@ -20,6 +20,9 @@ class CrossAttention(nn.Module):
 
         self.W_o = nn.Linear(d_model, d_model)
 
+        self.bn = nn.BatchNorm1d(d_model)
+        self.dropout = nn.Dropout(0.4)
+
     def forward(self, xq, xk, xv, mask=None):
 
         N, _ = xq.shape
@@ -43,6 +46,7 @@ class CrossAttention(nn.Module):
         out = out.transpose(0, 1).contiguous()  # [N, H, D]
         out = out.view(N, -1)
 
-        out = self.W_o(out)
+        # out = self.W_o(out)
+        # out = self.dropout(self.bn(out))
 
         return out

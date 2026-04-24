@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import os
 
 from tqdm import tqdm
@@ -23,6 +24,7 @@ class CrossDetector:
         self.scalar = config.scalar
         self.k = config.k
         self.num_heads = config.num_heads
+        self.num_experts = config.num_experts
         self.pooling = config.pooling
         self.readout = config.readout
 
@@ -41,6 +43,7 @@ class CrossDetector:
             scalar=self.scalar,
             k=self.k,
             num_heads=self.num_heads,
+            num_experts=self.num_experts,
             pooling=self.pooling,
             readout=self.readout
         ).to(self.device)
@@ -48,7 +51,8 @@ class CrossDetector:
 
     def fit(self, dataloader, dataloader_val):
         model = self.init_model()
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
+        # optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr)
         patience = 80
         counter = 0
 
@@ -63,6 +67,7 @@ class CrossDetector:
                 loss_ii, loss_pp, loss_ip = model.loss_func(emb, data.batch, self.temperature)
                 loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean()
                 loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 optimizer.step()
                 total_loss += loss.item() * data.num_graphs
 

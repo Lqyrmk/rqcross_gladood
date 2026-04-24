@@ -3,8 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_scatter
 
+from .gin import GIN
 from .bwgnn import BWGNN
 from .attention import CrossAttention
+from .moe import MMoE
 from torch_geometric.utils import subgraph
 from torch.nn import Sequential, Linear, ReLU
 from torch_geometric.nn import GINConv, global_add_pool, global_mean_pool, global_max_pool
@@ -25,6 +27,8 @@ class CROSS(nn.Module):
                  scalar=20,
                  k=10,
                  num_heads=5,
+                 num_experts=5,
+                 expert_dim=64,
                  explainer_model='gin',
                  explainer_layers=5,
                  explainer_readout='add',
@@ -54,8 +58,26 @@ class CROSS(nn.Module):
         self.cross_attn_low = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
         self.cross_attn_high = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
 
-        self.norm_low = nn.LayerNorm(self.emb_dim)
-        self.norm_high = nn.LayerNorm(self.emb_dim)
+        self.moe = MMoE(in_dim=in_dim,
+                        num_experts=num_experts,
+                        expert_dim=expert_dim,
+                        num_tasks=2,
+                        task_dim=self.emb_dim,
+                        hid_dim=hid_dim,
+                        out_dim=self.emb_dim,
+                        gnn_layers=num_layers)
+
+
+        self.norm = nn.BatchNorm1d(in_dim)
+
+        self.norm_low = nn.BatchNorm1d(self.emb_dim)
+        self.norm_high = nn.BatchNorm1d(self.emb_dim)
+
+        self.proto_proj_low = nn.Linear(self.emb_dim, self.emb_dim)
+        self.proto_proj_high = nn.Linear(self.emb_dim, self.emb_dim)
+
+        self.low_dropout = nn.Dropout(0.5)
+        self.high_dropout = nn.Dropout(0.5)
 
         self.init_emb()
 
@@ -99,13 +121,18 @@ class CROSS(nn.Module):
 
         x, edge_index, batch, num_graphs, num_nodes = data.x, data.edge_index, data.batch, data.num_graphs, data.num_nodes
 
-        n_v_h = self.bwgnn_encoder(x, edge_index)  # [n, md]
-        g_v_h = self.pool(n_v_h, batch)  # [g, md]
+        x = self.norm(x)
 
-        g_v_l, n_v_l = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
+        # nh = self.bwgnn_encoder(x, edge_index)  # [n, md]
+        # gh = self.pool(nh, batch)  # [g, md]
+        # gl, nl = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
 
-        high_g = self.cross_attn_high(g_v_h, self.prototype_codebooks, self.prototype_codebooks)
-        low_g = self.cross_attn_low(g_v_l, self.prototype_codebooks, self.prototype_codebooks)
+        towers_g = self.moe(x, edge_index, batch)
+        gh = towers_g[0]
+        gl = towers_g[1]
+
+        high_g = self.cross_attn_high(gh, self.prototype_codebooks, self.prototype_codebooks)
+        low_g = self.cross_attn_low(gl, self.prototype_codebooks, self.prototype_codebooks)
 
         high_g = self.norm_high(high_g)
         low_g = self.norm_low(low_g)
@@ -204,62 +231,6 @@ class Projector_MLP(torch.nn.Module):
 
     def forward(self, x, x_aug):
         return self.mlp(x), self.mlp_aug(x_aug)
-
-
-class GIN(torch.nn.Module):
-    def __init__(self, num_features, dim, num_gc_layers, pooling='mean', readout='add'):
-        super(GIN, self).__init__()
-
-        self.num_gc_layers = num_gc_layers
-        self.pooling = pooling
-        self.readout = readout
-
-        self.convs = torch.nn.ModuleList()
-        self.dim = dim
-        self.pool = self.get_pool()
-
-        for i in range(num_gc_layers):
-            if i:
-                net = Sequential(Linear(dim, dim), ReLU(), Linear(dim, dim))
-            else:
-                net = Sequential(Linear(num_features, dim), ReLU(), Linear(dim, dim))
-            conv = GINConv(net)
-
-            self.convs.append(conv)
-        self.dense = nn.Linear(dim, dim * num_gc_layers)
-
-    def forward(self, x, edge_index, batch):
-
-        xs = []
-        for i in range(self.num_gc_layers):
-            x = F.relu(self.convs[i](x, edge_index))
-
-            xs.append(x)  # [l_1, l_3, l_3...], l_k: [n, d]
-
-        if self.readout == 'last':
-            graph_emb = self.pool(xs[-1], batch)  # [g, d]
-            graph_emb = self.dense(graph_emb)
-        elif self.readout == 'concat':
-            graph_emb = torch.cat([self.pool(x, batch) for x in xs], 1)  # [g, md]
-        elif self.readout == 'add':
-            graph_emb = 0
-            for x in xs:
-                graph_emb += self.pool(x, batch)  # [g, d]
-            graph_emb = self.dense(graph_emb)
-        # graph: [g, d] or [g, md]
-        # node: [n, md]
-        return graph_emb, torch.cat(xs, 1)
-
-    def get_pool(self):
-        if self.pooling == 'add':
-            pool = global_add_pool
-        elif self.pooling == 'max':
-            pool = global_max_pool
-        elif self.pooling == 'mean' or self.pooling == 'avg':
-            pool = global_mean_pool
-        else:
-            raise ValueError("Pooling Name <{}> is Unknown".format(self.pooling))
-        return pool
 
 
 class Explainer_MLP(torch.nn.Module):
