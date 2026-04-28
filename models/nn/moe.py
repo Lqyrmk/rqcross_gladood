@@ -35,7 +35,7 @@ class Expert(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.bn = nn.BatchNorm1d(enc_out_dim)
-        self.relu = nn.ReLU()
+        self.relu = nn.LeakyReLU()
         self.dropout = nn.Dropout(0.2)
         self.proj = nn.Linear(enc_out_dim, out_dim)
 
@@ -79,6 +79,11 @@ class MMoE(nn.Module):
             lf_encoder = LfEncoder(in_dim, hid_dim, gnn_layers)
             self.experts.append(Expert(lf_encoder, enc_out_dim, expert_dim))
 
+        # 共享专家
+        shared_hf_expert = HfEncoder(in_dim, hid_dim, enc_out_dim)
+        self.experts.append(Expert(shared_hf_expert, enc_out_dim, expert_dim))
+        num_experts += 1
+
         # 全 bwgnn 效果也不错
         # for _ in range(num_experts):
         #     hf_encoder = HfEncoder(in_dim, hid_dim, enc_out_dim)
@@ -91,7 +96,10 @@ class MMoE(nn.Module):
         self.task_towers = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(expert_dim, task_dim),
-                nn.ReLU(),
+                # nn.ReLU(),
+                nn.BatchNorm1d(task_dim),
+                nn.LeakyReLU(),
+                nn.Dropout(0.3),
                 nn.Linear(task_dim, out_dim)
             ) for _ in range(num_tasks)
         ])
@@ -105,7 +113,7 @@ class MMoE(nn.Module):
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                init.kaiming_normal_(m.weight, nonlinearity='relu')
+                init.kaiming_normal_(m.weight, nonlinearity='leaky_relu')
                 if m.bias is not None:
                     init.zeros_(m.bias)
 
