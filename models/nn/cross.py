@@ -5,7 +5,7 @@ import torch_scatter
 
 from .gin import GIN
 from .bwgnn import BWGNN
-from .attention import CrossAttention
+from .attention import CrossAttention, SelfAttention
 from .moe import MMoE
 from torch_geometric.utils import subgraph
 from torch.nn import Sequential, Linear, ReLU
@@ -57,6 +57,9 @@ class CROSS(nn.Module):
 
         self.cross_attn_low = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
         self.cross_attn_high = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
+
+        self.self_attn_low = SelfAttention(d_model=self.emb_dim, num_heads=self.num_heads)
+        self.self_attn_high = SelfAttention(d_model=self.emb_dim, num_heads=self.num_heads)
 
         self.moe = MMoE(in_dim=in_dim,
                         num_experts=num_experts,
@@ -131,8 +134,11 @@ class CROSS(nn.Module):
         gh = towers_g[0]
         gl = towers_g[1]
 
-        high_g = self.cross_attn_high(gh, self.prototype_codebooks, self.prototype_codebooks)
-        low_g = self.cross_attn_low(gl, self.prototype_codebooks, self.prototype_codebooks)
+        gh, h_self_scores = self.self_attn_high(gh)
+        gl, l_self_scores = self.self_attn_low(gl)
+
+        high_g, h_cross_scores = self.cross_attn_high(gh, self.prototype_codebooks, self.prototype_codebooks)
+        low_g, l_cross_scores = self.cross_attn_low(gl, self.prototype_codebooks, self.prototype_codebooks)
 
         high_g = self.norm_high(high_g)
         low_g = self.norm_low(low_g)
@@ -140,13 +146,13 @@ class CROSS(nn.Module):
         high_p = self.allocate_prototype(high_g)
         low_p = self.allocate_prototype(low_g)
 
-        return high_g, low_g, high_p, low_p
+        return gh, gl, high_g, low_g, high_p, low_p, h_self_scores, l_self_scores, h_cross_scores, l_cross_scores
 
     def loss_func(self, emb_list, batch, t):
 
-        high_g, low_g, high_p, low_p = emb_list
+        gh, gl, high_g, low_g, high_p, low_p, _, _, _, _ = emb_list
 
-        loss_ii = self.calc_gcl_loss_g(high_g, low_g, t)
+        loss_ii = self.calc_gcl_loss_g(high_g, low_g, t) + self.calc_gcl_loss_g(gh, gl, t)
         loss_pp = self.calc_gcl_loss_g(high_p, low_p, t)
         loss_ip = self.calc_gcl_loss_g(high_g, high_p, t) + self.calc_gcl_loss_g(low_g, low_p, t)
 
@@ -154,9 +160,9 @@ class CROSS(nn.Module):
 
     def score_func(self, emb_list, batch, t):
 
-        high_g, low_g, high_p, low_p = emb_list
+        gh, gl, high_g, low_g, high_p, low_p, _, _, _, _ = emb_list
 
-        score_ii = self.calc_gcl_loss_g(high_g, low_g, t)
+        score_ii = self.calc_gcl_loss_g(high_g, low_g, t) + self.calc_gcl_loss_g(gh, gl, t)
         score_pp = self.calc_gcl_loss_g(high_p, low_p, t)
         score_ip = self.calc_gcl_loss_g(high_g, high_p, t) + self.calc_gcl_loss_g(low_g, low_p, t)
 

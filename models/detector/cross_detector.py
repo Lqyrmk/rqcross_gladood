@@ -6,6 +6,7 @@ from tqdm import tqdm
 from ..nn import cross
 from utils.path import get_model_save_path, clear_directory
 from utils.metrics import ood_auc
+from visualization.attention_heatmap import visualize_attention
 
 class CrossDetector:
 
@@ -103,6 +104,11 @@ class CrossDetector:
             for data in dataloader:
                 data = data.to(self.device)
                 emb = model(data)
+                h_self_scores, l_self_scores, h_cross_scores, l_cross_scores = emb[-4], emb[-3], emb[-2], emb[-1]
+                visualize_attention(h_self_scores, title="High Self Attention")
+                visualize_attention(l_self_scores, title="Low Self Attention")
+                visualize_attention(h_cross_scores, title="High Cross Attention")
+                visualize_attention(l_cross_scores, title="Low Cross Attention")
                 s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
                 # score.extend( s.cpu().tolist() )
                 score.extend( (s_ii + s_pp + s_ip).cpu().tolist() )
