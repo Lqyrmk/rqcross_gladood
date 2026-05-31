@@ -56,8 +56,10 @@ class CROSS(nn.Module):
         self.cross_attn_low = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
         self.cross_attn_high = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
 
-        self.self_attn_low = SelfAttention(d_model=self.emb_dim, num_heads=self.num_heads)
-        self.self_attn_high = SelfAttention(d_model=self.emb_dim, num_heads=self.num_heads)
+        self.in_self_attn = SelfAttention(d_model=in_dim, num_heads=1)
+        self.shared_self_attn = SelfAttention(d_model=self.emb_dim, num_heads=1)
+        self.self_attn_low = SelfAttention(d_model=self.emb_dim, num_heads=1)
+        self.self_attn_high = SelfAttention(d_model=self.emb_dim, num_heads=1)
 
         self.moe = MMoE(in_dim=in_dim,
                         num_experts=num_experts,
@@ -79,6 +81,8 @@ class CROSS(nn.Module):
 
         self.low_dropout = nn.Dropout(0.5)
         self.high_dropout = nn.Dropout(0.5)
+
+        self.attn_pool_proj = nn.Linear(self.emb_dim, self.emb_dim)
 
         self.init_emb()
 
@@ -117,6 +121,19 @@ class CROSS(nn.Module):
         p = self.prototype_codebooks[labels]  # [N, D]
         return p
 
+    def intra_graph_mask(self, batch):
+        # 1. [N] -> [N, 1] unsqueeze(1)
+        # 2. [N] -> [1, N] unsqueeze(0)
+        mask = batch.unsqueeze(1) == batch.unsqueeze(0)
+        # print(f"mask = {mask.shape}")
+        return mask
+
+    def self_attn_pool(self, nx, batch):
+        # attn_x, _ = self.self_attn_low(nx, self.intra_graph_mask(batch))
+        attn_x, _ = self.shared_self_attn(nx)
+        nx = nx + attn_x
+        gx = self.attn_pool_proj(global_mean_pool(nx, batch))
+        return gx
 
     def forward(self, data):
 
@@ -130,10 +147,14 @@ class CROSS(nn.Module):
 
         task_outs_g, task_outs_n = self.moe(x, edge_index, batch)
         gh, gl = task_outs_g
-        nh, nl = task_outs_n
+        # nh, nl = task_outs_n
 
-        high_g, h_cross_scores = self.cross_attn_high(gh, self.prototype_codebooks, self.prototype_codebooks)
-        low_g, l_cross_scores = self.cross_attn_low(gl, self.prototype_codebooks, self.prototype_codebooks)
+        # 图内注意力
+        # attn_gh = self.self_attn_pool(nh, batch)
+        # attn_gl = self.self_attn_pool(nl, batch)
+
+        high_g, _ = self.cross_attn_high(gh, self.prototype_codebooks, self.prototype_codebooks)
+        low_g, _ = self.cross_attn_low(gl, self.prototype_codebooks, self.prototype_codebooks)
 
         high_g = self.norm_high(high_g)
         low_g = self.norm_low(low_g)
@@ -141,24 +162,31 @@ class CROSS(nn.Module):
         high_p = self.allocate_prototype(high_g)
         low_p = self.allocate_prototype(low_g)
 
-        return gh, gl, high_g, low_g, high_p, low_p, h_cross_scores, l_cross_scores
+        # return gh, gl, high_g, low_g, high_p, low_p, attn_gh, attn_gl
+        return gh, gl, high_g, low_g, high_p, low_p
 
     def loss_func(self, emb_list, batch, t):
 
-        gh, gl, high_g, low_g, high_p, low_p, _, _ = emb_list
+        # gh, gl, high_g, low_g, high_p, low_p, attn_gh, attn_gl = emb_list
+        gh, gl, high_g, low_g, high_p, low_p = emb_list
 
         loss_ii = self.calc_gcl_loss_g(high_g, low_g, t) + self.calc_gcl_loss_g(gh, gl, t)
-        loss_pp = self.calc_gcl_loss_g(high_p, low_p, t)
+        # loss_ii += self.calc_gcl_loss_g(attn_gh, attn_gl, t)
+        # loss_pp = self.calc_gcl_loss_g(high_p, low_p, t)
+        loss_pp = torch.tensor([0.]).to(batch.device)
         loss_ip = self.calc_gcl_loss_g(high_g, high_p, t) + self.calc_gcl_loss_g(low_g, low_p, t)
 
         return loss_ii, loss_pp, loss_ip
 
     def score_func(self, emb_list, batch, t):
 
-        gh, gl, high_g, low_g, high_p, low_p, _, _ = emb_list
+        # gh, gl, high_g, low_g, high_p, low_p, attn_gh, attn_gl = emb_list
+        gh, gl, high_g, low_g, high_p, low_p = emb_list
 
         score_ii = self.calc_gcl_loss_g(high_g, low_g, t) + self.calc_gcl_loss_g(gh, gl, t)
-        score_pp = self.calc_gcl_loss_g(high_p, low_p, t)
+        # score_ii += self.calc_gcl_loss_g(attn_gh, attn_gl, t)
+        # score_pp = self.calc_gcl_loss_g(high_p, low_p, t)
+        score_pp = torch.tensor([0.]).to(batch.device)
         score_ip = self.calc_gcl_loss_g(high_g, high_p, t) + self.calc_gcl_loss_g(low_g, low_p, t)
 
         return score_ii, score_pp, score_ip

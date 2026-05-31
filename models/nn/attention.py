@@ -85,11 +85,11 @@ class SelfAttention(nn.Module):
         # [num_heads, seq_len, head_dim]
         scores = (Q @ K.transpose(-2, -1)) / math.sqrt(self.head_dim)
 
-        # causal mask
-        # scores = scores + torch.triu(
-        #     torch.full((seq_len, seq_len), float('-inf')),
-        #     diagonal=1
-        # ).unsqueeze(0).unsqueeze(0)
+        # scores: [num_heads, seq_len, seq_len]
+        # graph mask
+        if mask is not None:  # [seq_len, seq_len]
+            mask = ~mask.unsqueeze(0)  # [1, seq_len, seq_len]
+            scores = scores.masked_fill(mask, float('-inf'))
 
         scores = F.softmax(scores.float(), dim=-1).type_as(Q)
 

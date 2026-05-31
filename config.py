@@ -39,7 +39,7 @@ class Config:
     batch_size: int = 128
     batch_size_test: int = 9999
     lr: float = 0.001
-    num_epoch: int = 500
+    num_epoch: int = 400
     num_trial: int = 5
     eval_freq: int = 5
     alpha: float = 1.0
