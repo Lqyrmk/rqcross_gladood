@@ -59,17 +59,19 @@ class CrossDetector:
 
         for epoch in range(1, self.config.num_epoch + 1):
             model.train()
+            total_mean_loss = 0
             total_loss = 0
 
             for data in dataloader:
                 data = data.to(self.device)
                 optimizer.zero_grad()
                 emb = model(data)
-                loss_ii, loss_pp, loss_ip = model.loss_func(emb, data.batch, self.temperature)
-                loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean()
+                loss_ii, loss_pp, loss_ip, loss_rec = model.loss_func(emb, data.batch, self.temperature)
+                loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean() + loss_rec.mean()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 optimizer.step()
+                total_mean_loss += loss.item()
                 total_loss += loss.item() * data.num_graphs
 
             if epoch % self.config.eval_freq == 0:
@@ -78,9 +80,9 @@ class CrossDetector:
                 for data in dataloader_val:
                     data = data.to(self.device)
                     emb = model(data)
-                    s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
+                    s_ii, s_pp, s_ip, s_rec = model.score_func(emb, data.batch, self.temperature)
                     # score.extend( s.cpu().tolist() )
-                    score.extend( (s_ii + s_pp + s_ip).cpu().tolist() )
+                    score.extend( (s_ii + s_pp + s_ip + s_rec).cpu().tolist() )
                     y.extend(data.y.cpu().tolist())
 
                 auc = ood_auc(y, score)
@@ -90,7 +92,7 @@ class CrossDetector:
                     torch.save(model, os.path.join(self.path,'model.pth'))
                 else:
                     counter +=1
-                print(f"[Epoch {epoch:03d}] Val AUC: {auc:.4f} | Best: {self.max_auc:.4f}")
+                print(f"[Epoch {epoch:03d}] Val AUC: {auc:.4f} | Best: {self.max_auc:.4f} | Total Mean Loss: {total_mean_loss:.4f}")
                 if counter >= patience or self.max_auc > 0.999:
                     print(f"Early stop triggered.")
                     break
@@ -109,9 +111,9 @@ class CrossDetector:
                 # visualize_attention(l_self_scores, title="Low Self Attention")
                 # visualize_attention(h_cross_scores, title="High Cross Attention")
                 # visualize_attention(l_cross_scores, title="Low Cross Attention")
-                s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
+                s_ii, s_pp, s_ip, s_rec = model.score_func(emb, data.batch, self.temperature)
                 # score.extend( s.cpu().tolist() )
-                score.extend( (s_ii + s_pp + s_ip).cpu().tolist() )
+                score.extend( (s_ii + s_pp + s_ip + s_rec).cpu().tolist() )
                 y.extend(data.y.cpu().tolist())
 
         return score, y

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GINConv, global_add_pool, global_mean_pool, global_max_pool
 
 class GIN(nn.Module):
-    def __init__(self, num_features, dim, num_gc_layers, pooling='mean', readout='add'):
+    def __init__(self, in_dim, dim, num_gc_layers, pooling='mean', readout='add'):
         super(GIN, self).__init__()
 
         self.num_gc_layers = num_gc_layers
@@ -25,7 +25,7 @@ class GIN(nn.Module):
                 )
             else:
                 net = nn.Sequential(
-                    nn.Linear(num_features, dim),
+                    nn.Linear(in_dim, dim),
                     nn.ReLU(),
                     nn.Linear(dim, dim)
                 )
@@ -40,7 +40,7 @@ class GIN(nn.Module):
         for i in range(self.num_gc_layers):
             x = F.relu(self.convs[i](x, edge_index))
 
-            xs.append(x)  # [l_1, l_3, l_3...], l_k: [n, d]
+            xs.append(x)  # [l_1, l_2, l_3...], l_k: [n, d]
 
         if self.readout == 'last':
             graph_emb = self.pool(xs[-1], batch)  # [g, d]
@@ -52,7 +52,7 @@ class GIN(nn.Module):
             for x in xs:
                 graph_emb += self.pool(x, batch)  # [g, d]
             graph_emb = self.dense(graph_emb)
-        # graph: [g, d] or [g, md]
+        # graph: [g, md]
         # node: [n, md]
         return graph_emb, torch.cat(xs, 1)
 

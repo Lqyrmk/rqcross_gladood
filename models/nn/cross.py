@@ -84,6 +84,13 @@ class CROSS(nn.Module):
 
         self.attn_pool_proj = nn.Linear(self.emb_dim, self.emb_dim)
 
+        # self.decoder = GIN(self.emb_dim, hid_dim, num_layers, pooling, readout)
+        self.dec_proj_high = nn.Linear(self.emb_dim, self.emb_dim)
+        self.dec_proj_low = nn.Linear(self.emb_dim, self.emb_dim)
+
+        # 重建
+        self.recon_loss = nn.MSELoss()
+
         self.init_emb()
 
     def init_emb(self):
@@ -153,46 +160,55 @@ class CROSS(nn.Module):
         # attn_gh = self.self_attn_pool(nh, batch)
         # attn_gl = self.self_attn_pool(nl, batch)
 
-        high_g, _ = self.cross_attn_high(gh, self.prototype_codebooks, self.prototype_codebooks)
-        low_g, _ = self.cross_attn_low(gl, self.prototype_codebooks, self.prototype_codebooks)
+        cross_gh, _ = self.cross_attn_high(gh, self.prototype_codebooks, self.prototype_codebooks)
+        cross_gl, _ = self.cross_attn_low(gl, self.prototype_codebooks, self.prototype_codebooks)
 
-        high_g = self.norm_high(high_g)
-        low_g = self.norm_low(low_g)
+        cross_gh = self.norm_high(cross_gh)
+        cross_gl = self.norm_low(cross_gl)
 
-        high_p = self.allocate_prototype(high_g)
-        low_p = self.allocate_prototype(low_g)
+        hp = self.allocate_prototype(cross_gh)
+        lp = self.allocate_prototype(cross_gl)
 
-        # return gh, gl, high_g, low_g, high_p, low_p, attn_gh, attn_gl
-        return gh, gl, high_g, low_g, high_p, low_p
+        h_rec = self.dec_proj_high(hp)
+        l_rec = self.dec_proj_low(lp)
+
+        # return gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl
+        return gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec
 
     def loss_func(self, emb_list, batch, t):
 
-        # gh, gl, high_g, low_g, high_p, low_p, attn_gh, attn_gl = emb_list
-        gh, gl, high_g, low_g, high_p, low_p = emb_list
+        # gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl = emb_list
+        gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
 
-        loss_ii = self.calc_gcl_loss_g(high_g, low_g, t) + self.calc_gcl_loss_g(gh, gl, t)
-        # loss_ii += self.calc_gcl_loss_g(attn_gh, attn_gl, t)
-        # loss_pp = self.calc_gcl_loss_g(high_p, low_p, t)
+        loss_ii = self.gcl_loss_g(cross_gh, cross_gl, t) + self.gcl_loss_g(gh, gl, t)
+        # loss_ii += self.gcl_loss_g(attn_gh, attn_gl, t)
+        # loss_pp = self.gcl_loss_g(hp, lp, t)
         loss_pp = torch.tensor([0.]).to(batch.device)
-        loss_ip = self.calc_gcl_loss_g(high_g, high_p, t) + self.calc_gcl_loss_g(low_g, low_p, t)
+        loss_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
 
-        return loss_ii, loss_pp, loss_ip
+        loss_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
+        # loss_recon = torch.tensor([0.]).to(batch.device)
+
+        return loss_ii, loss_pp, loss_ip, loss_recon
 
     def score_func(self, emb_list, batch, t):
 
-        # gh, gl, high_g, low_g, high_p, low_p, attn_gh, attn_gl = emb_list
-        gh, gl, high_g, low_g, high_p, low_p = emb_list
+        # gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl = emb_list
+        gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
 
-        score_ii = self.calc_gcl_loss_g(high_g, low_g, t) + self.calc_gcl_loss_g(gh, gl, t)
-        # score_ii += self.calc_gcl_loss_g(attn_gh, attn_gl, t)
-        # score_pp = self.calc_gcl_loss_g(high_p, low_p, t)
+        score_ii = self.gcl_loss_g(cross_gh, cross_gl, t) + self.gcl_loss_g(gh, gl, t)
+        # score_ii += self.gcl_loss_g(attn_gh, attn_gl, t)
+        # score_pp = self.gcl_loss_g(hp, lp, t)
         score_pp = torch.tensor([0.]).to(batch.device)
-        score_ip = self.calc_gcl_loss_g(high_g, high_p, t) + self.calc_gcl_loss_g(low_g, low_p, t)
+        score_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
 
-        return score_ii, score_pp, score_ip
+        score_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
+        # score_recon = torch.tensor([0.]).to(batch.device)
+
+        return score_ii, score_pp, score_ip, score_recon
 
     @staticmethod
-    def calc_gcl_loss_n(x, x_aug, batch, temperature=0.2):
+    def gcl_loss_n(x, x_aug, batch, temperature=0.2):
         batch_size, _ = x.size()
         x_abs = x.norm(dim=1)
         x_aug_abs = x_aug.norm(dim=1)
@@ -215,7 +231,7 @@ class CROSS(nn.Module):
         return loss
 
     @staticmethod
-    def calc_gcl_loss_g(x, x_aug, temperature=0.2):
+    def gcl_loss_g(x, x_aug, temperature=0.2):
         batch_size, _ = x.size()
         x_abs = x.norm(dim=1)
         x_aug_abs = x_aug.norm(dim=1)
