@@ -46,8 +46,6 @@ class CROSS(nn.Module):
         self.emb = None
         self.emb_dim = num_layers * hid_dim
 
-        self.pool = self.get_pool()
-
         self.bwgnn_encoder = BWGNN(in_dim, self.emb_dim, self.emb_dim)
         self.gin_encoder = GIN(in_dim, hid_dim, num_layers, pooling, readout)
 
@@ -130,12 +128,9 @@ class CROSS(nn.Module):
         # gh = self.pool(nh, batch)  # [g, md]
         # gl, nl = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
 
-        towers_g = self.moe(x, edge_index, batch)
-        gh = towers_g[0]
-        gl = towers_g[1]
-
-        gh, h_self_scores = self.self_attn_high(gh)
-        gl, l_self_scores = self.self_attn_low(gl)
+        task_outs_g, task_outs_n = self.moe(x, edge_index, batch)
+        gh, gl = task_outs_g
+        nh, nl = task_outs_n
 
         high_g, h_cross_scores = self.cross_attn_high(gh, self.prototype_codebooks, self.prototype_codebooks)
         low_g, l_cross_scores = self.cross_attn_low(gl, self.prototype_codebooks, self.prototype_codebooks)
@@ -146,11 +141,11 @@ class CROSS(nn.Module):
         high_p = self.allocate_prototype(high_g)
         low_p = self.allocate_prototype(low_g)
 
-        return gh, gl, high_g, low_g, high_p, low_p, h_self_scores, l_self_scores, h_cross_scores, l_cross_scores
+        return gh, gl, high_g, low_g, high_p, low_p, h_cross_scores, l_cross_scores
 
     def loss_func(self, emb_list, batch, t):
 
-        gh, gl, high_g, low_g, high_p, low_p, _, _, _, _ = emb_list
+        gh, gl, high_g, low_g, high_p, low_p, _, _ = emb_list
 
         loss_ii = self.calc_gcl_loss_g(high_g, low_g, t) + self.calc_gcl_loss_g(gh, gl, t)
         loss_pp = self.calc_gcl_loss_g(high_p, low_p, t)
@@ -160,7 +155,7 @@ class CROSS(nn.Module):
 
     def score_func(self, emb_list, batch, t):
 
-        gh, gl, high_g, low_g, high_p, low_p, _, _, _, _ = emb_list
+        gh, gl, high_g, low_g, high_p, low_p, _, _ = emb_list
 
         score_ii = self.calc_gcl_loss_g(high_g, low_g, t) + self.calc_gcl_loss_g(gh, gl, t)
         score_pp = self.calc_gcl_loss_g(high_p, low_p, t)

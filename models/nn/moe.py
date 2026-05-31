@@ -15,8 +15,9 @@ class HfEncoder(nn.Module):
 
     def forward(self, x, edge_index, batch):
         node_emb = self.bw_encoder(x, edge_index)  # [n, md]
-        graph_emb = global_mean_pool(node_emb, batch)  # [g, md]
-        return graph_emb
+        # graph_emb = global_mean_pool(node_emb, batch)  # [g, md]
+        # return graph_emb, node_emb
+        return node_emb
 
 
 class LfEncoder(nn.Module):
@@ -26,8 +27,9 @@ class LfEncoder(nn.Module):
         self.gin_encoder = GIN(in_dim, hid_dim, num_layers)
 
     def forward(self, x, edge_index, batch):
-        graph_emb, node_emb = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
-        return graph_emb
+        # graph_emb, node_emb = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
+        _, node_emb = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
+        return node_emb
 
 
 class Expert(nn.Module):
@@ -35,17 +37,13 @@ class Expert(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.bn = nn.BatchNorm1d(enc_out_dim)
-        self.relu = nn.LeakyReLU()
+        self.act = nn.LeakyReLU()
         self.dropout = nn.Dropout(0.2)
         self.proj = nn.Linear(enc_out_dim, out_dim)
 
     def forward(self, x, edge_index, batch):
-        feat = self.encoder(x, edge_index, batch)
-        feat = self.bn(feat)
-        feat = self.relu(feat)
-        feat = self.dropout(feat)
-        out = self.proj(feat)
-        return out
+        n_feat = self.encoder(x, edge_index, batch)
+        return self.proj(self.dropout(self.act(self.bn(n_feat))))
 
 class MMoE(nn.Module):
 
@@ -104,6 +102,8 @@ class MMoE(nn.Module):
             ) for _ in range(num_tasks)
         ])
 
+        self.graph_dense = nn.Linear(enc_out_dim, enc_out_dim)
+
         self.expert_norm = nn.BatchNorm1d(enc_out_dim)
         self.gate_dropout = nn.Dropout(0.2)
         self.out_dropout = nn.Dropout(0.2)
@@ -117,31 +117,40 @@ class MMoE(nn.Module):
                 if m.bias is not None:
                     init.zeros_(m.bias)
 
-    def forward(self, x, edge_index, batch):
-
-        expert_outs = [expert(x, edge_index, batch) for expert in self.experts]  # expert(x): [B, d]
-        expert_outs = torch.stack(expert_outs, dim=1)  # [B, E, d]
-
-        g_x = global_mean_pool(x, batch)
+    def task_forward(self, x, expert_outs):
 
         task_outs = []
         for i in range(self.num_tasks):
 
-            gate_out = self.gates[i](g_x)
-            gate_weight = F.softmax(gate_out, dim=-1)  # [B, E]
+            gate_out = self.gates[i](x)
+            gate_weight = F.softmax(gate_out, dim=-1)  # [N, E]
 
             # 防止专家饥饿
             gate_weight = self.gate_dropout(gate_weight)
 
             # method 1: matrix multiplication
-            # [B, 1, E] @ [B, E, d] -> [B, 1, d] -> [B, d]
+            # [N, 1, E] @ [N, E, d] -> [N, 1, d] -> [N, d]
             # fused = torch.matmul(gate_weight.unsqueeze(1), expert_outs).squeeze(1)  # or torch.bmm
             # method 2: element-wise product and sum
-            # [B, E, 1] * [B, E, d] -> [B, E, d] -> [B, d]
+            # [N, E, 1] * [N, E, d] -> [N, E, d] -> [N, d]
             fused = torch.sum(gate_weight.unsqueeze(-1) * expert_outs, dim=1)
 
-            out = self.task_towers[i](fused)  # [B, dt]
+            out = self.task_towers[i](fused)  # [N, dt]
             out = self.out_dropout(self.expert_norm(out))
             task_outs.append(out)
-
         return task_outs
+
+    def forward(self, x, edge_index, batch):
+
+        expert_outs_n = []
+        for expert in self.experts:
+            n_out = expert(x, edge_index, batch)
+            expert_outs_n.append(n_out)  # [N, d]
+
+        expert_outs_n = torch.stack(expert_outs_n, dim=1)  # [N, E, d]
+
+        task_outs_n = self.task_forward(x, expert_outs_n)
+
+        task_outs_g = [self.graph_dense(global_mean_pool(x, batch)) for x in task_outs_n]
+
+        return task_outs_g, task_outs_n
