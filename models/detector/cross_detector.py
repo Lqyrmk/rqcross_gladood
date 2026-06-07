@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import os
+import numpy as np
 
 from tqdm import tqdm
 from ..nn import cross
 from utils.path import get_model_save_path, clear_directory
 from utils.metrics import ood_auc
 from visualization.attention_heatmap import visualize_attention
-
+from sklearn.cluster import KMeans
 class CrossDetector:
 
     def __init__(self, config):
@@ -50,8 +51,57 @@ class CrossDetector:
         ).to(self.device)
 
 
+    def initialize_codebook(self, model, dataloader, num_batches=5):
+        config = self.config
+
+        if not config.kmeans_init:
+            print(f"跳过 KMeans 码本初始化")
+            return
+
+        print(f"开始 KMeans 码本初始化...")
+        print(f"使用前 {config.kmeans_init_num_batches} 个 batch 进行初始化...")
+
+        model.eval()
+        all_z_e = []
+
+        with torch.no_grad():
+            for i, data in enumerate(tqdm(dataloader)):
+                if i >= config.kmeans_init_num_batches:
+                    break
+
+                data = data.to(self.device)
+                x = data.x  # [B, D]
+                z_e = model.encoder(x)  # [B, H]
+                all_z_e.append(z_e.cpu().numpy())
+
+                print(f"\nBatch {i}, z_e = {z_e.shape}")
+
+        all_z_e = np.concatenate(all_z_e, axis=0)
+        print(f"潜向量个数：{len(all_z_e)}")
+        print(f"开始聚类...")
+
+        kmeans = KMeans(n_clusters=config.k, random_state=config.seed)
+        kmeans.fit(all_z_e)
+
+        cluster_centers = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32)
+        # # 初始化码本
+        # model.vq.embedding.weight.data.copy_(cluster_centers)
+        # # 初始化 EMA 的移动平均变量
+        # model.vq._ema_w.data.copy_(cluster_centers)
+
+        model.prototype_codebooks.weight.data.copy_(cluster_centers)
+
+        print(f"KMeans 聚类完成")
+
+        # 切换回去
+        model.train()
+
     def fit(self, dataloader, dataloader_val):
         model = self.init_model()
+
+        # 训练前，先做一次KMeans码本初始化
+        # self.initialize_codebook(model, dataloader, num_batches=5)
+
         # optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
         optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr)
         patience = 80
@@ -106,7 +156,7 @@ class CrossDetector:
             for data in dataloader:
                 data = data.to(self.device)
                 emb = model(data)
-                h_self_scores, l_self_scores, h_cross_scores, l_cross_scores = emb[-4], emb[-3], emb[-2], emb[-1]
+                # h_self_scores, l_self_scores, h_cross_scores, l_cross_scores = emb[-4], emb[-3], emb[-2], emb[-1]
                 # visualize_attention(h_self_scores, title="High Self Attention")
                 # visualize_attention(l_self_scores, title="Low Self Attention")
                 # visualize_attention(h_cross_scores, title="High Cross Attention")

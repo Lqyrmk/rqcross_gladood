@@ -46,6 +46,10 @@ class Config:
     beta: float = 1.0
     n_train: int = 10
 
+    # ============== 码本初始化超参 ==============
+    kmeans_init: bool = True
+    kmeans_init_num_batches: int = 5
+
 
 def parse_args() -> Config:
     """解析命令行参数，映射到 Config"""
