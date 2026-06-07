@@ -49,6 +49,10 @@ class CROSS(nn.Module):
         self.bwgnn_encoder = BWGNN(in_dim, self.emb_dim, self.emb_dim)
         self.gin_encoder = GIN(in_dim, hid_dim, num_layers, pooling, readout)
 
+        self.graph_dense_layers = nn.ModuleList([nn.Linear(self.emb_dim, self.emb_dim),
+                                                 nn.Linear(self.emb_dim, self.emb_dim)])
+        self.extractor = Explainer_GIN(self.emb_dim, self.emb_dim, num_layers, readout)
+
         self.k = k
         self.num_heads = num_heads
         self.prototype_codebooks = nn.Parameter(torch.rand(self.k, self.emb_dim))
@@ -123,8 +127,24 @@ class CROSS(nn.Module):
     def allocate_prototype(self, x):
         # x: [N, D]
         # codebook: [K, D]
+
+        # 1.基于内积相似度
         sim = x @ self.prototype_codebooks.T  # [N, K]
         labels = sim.argmax(dim=1)  # [N,]
+        # 2.基于 L2 距离
+        distances = (
+            torch.sum(x ** 2, dim=1, keepdim=True)  # [N, 1]
+            + torch.sum(self.prototype_codebooks ** 2, dim=1)  # [K,]
+            - 2 * torch.matmul(x, self.prototype_codebooks.t())  # [N, K]
+        )
+        labels = torch.argmin(distances, dim=1)  # [N,]
+
+        # 计算利用率
+        # encodings = F.one_hot(labels, self.k).type(x.dtype)  # [N, K]
+        # avg_probs = encodings.mean(dim=0)  # [K,] 利用率
+        # print(f"当前 batch 码本利用率：{[(str(p.item() * 100) + '%') for p in avg_probs]}")
+
+        # 返回原型
         p = self.prototype_codebooks[labels]  # [N, D]
         return p
 
@@ -142,6 +162,10 @@ class CROSS(nn.Module):
         gx = self.attn_pool_proj(global_mean_pool(nx, batch))
         return gx
 
+    def node_masking(self, x, node_prob, batch):
+        mask = self.process_probability(node_prob, batch)
+        return x * mask
+
     def forward(self, data):
 
         x, edge_index, batch, num_graphs, num_nodes = data.x, data.edge_index, data.batch, data.num_graphs, data.num_nodes
@@ -152,9 +176,18 @@ class CROSS(nn.Module):
         # gh = self.pool(nh, batch)  # [g, md]
         # gl, nl = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
 
-        task_outs_g, task_outs_n = self.moe(x, edge_index, batch)
-        gh, gl = task_outs_g
+        # task_outs_g, task_outs_n = self.moe(x, edge_index, batch)
+        _, task_outs_n = self.moe(x, edge_index, batch)
+        # gh, gl = task_outs_g
         # nh, nl = task_outs_n
+
+        task_sub_g = []
+        for i, nx in enumerate(task_outs_n):
+            node_prob = self.extractor(nx, edge_index, batch)
+            sub_nx = self.node_masking(nx, node_prob, batch)
+            sub_gx = self.graph_dense_layers[i](global_mean_pool(sub_nx, batch))
+            task_sub_g.append(sub_gx)
+        gh, gl = task_sub_g
 
         # 图内注意力
         # attn_gh = self.self_attn_pool(nh, batch)
@@ -186,8 +219,8 @@ class CROSS(nn.Module):
         loss_pp = torch.tensor([0.]).to(batch.device)
         loss_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
 
-        loss_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
-        # loss_recon = torch.tensor([0.]).to(batch.device)
+        # loss_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
+        loss_recon = torch.tensor([0.]).to(batch.device)
 
         return loss_ii, loss_pp, loss_ip, loss_recon
 
