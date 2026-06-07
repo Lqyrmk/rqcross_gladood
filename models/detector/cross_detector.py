@@ -15,43 +15,17 @@ class CrossDetector:
 
         self.config = config
         self.device = config.device
-
-        self.in_dim = config.dataset_num_features
-        self.hid_dim = config.hidden_dim
-        self.num_layers = config.num_layer
         self.lr = config.lr
         self.temperature = config.temperature
-        self.dropout = config.dropout
-        self.eps = config.eps
-        self.scalar = config.scalar
-        self.k = config.k
-        self.num_heads = config.num_heads
-        self.num_experts = config.num_experts
-        self.pooling = config.pooling
-        self.readout = config.readout
 
         self.path = get_model_save_path(config)
         clear_directory(self.path)
         self.max_auc = 0
 
-
     def init_model(self):
-        return cross.CROSS(
-            in_dim=self.in_dim,
-            hid_dim=self.hid_dim,
-            num_layers=self.num_layers,
-            dropout=self.dropout,
-            eps=self.eps,
-            scalar=self.scalar,
-            k=self.k,
-            num_heads=self.num_heads,
-            num_experts=self.num_experts,
-            pooling=self.pooling,
-            readout=self.readout
-        ).to(self.device)
+        return cross.CROSS(self.config).to(self.device)
 
-
-    def initialize_codebook(self, model, dataloader, num_batches=5):
+    def initialize_codebook(self, model, dataloader):
         config = self.config
 
         if not config.kmeans_init:

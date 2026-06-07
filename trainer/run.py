@@ -14,7 +14,7 @@ def run_single_trial(config, trial_idx: int):
 
     # meta info
     config.max_nodes_num = meta["max_nodes_num"]
-    config.dataset_num_features = meta["num_feat"]
+    config.in_dim = meta["num_feat"]  # dataset_num_features
     config.n_train = meta["num_train"]
     config.n_edge_feat = meta.get("num_edge_feat", 0)
 

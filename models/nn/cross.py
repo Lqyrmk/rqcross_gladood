@@ -7,6 +7,7 @@ from .gin import GIN
 from .bwgnn import BWGNN
 from .attention import CrossAttention, SelfAttention
 from .moe import MMoE
+from .vqvae import VectorQuantizerEMA
 from torch_geometric.utils import subgraph
 from torch.nn import Sequential, Linear, ReLU
 from torch_geometric.nn import GINConv, global_add_pool, global_mean_pool, global_max_pool
@@ -16,49 +17,34 @@ from torch_scatter import scatter_add
 
 class CROSS(nn.Module):
 
-    def __init__(self,
-                 in_dim,
-                 hid_dim,
-                 num_layers=5,
-                 pooling='mean',
-                 readout='concat',
-                 mask_threshold=0.4,
-                 eps=0.001,
-                 scalar=20,
-                 k=10,
-                 num_heads=5,
-                 num_experts=5,
-                 expert_dim=64,
-                 explainer_model='gin',
-                 explainer_layers=5,
-                 explainer_readout='add',
-                 **kwargs):
+    def __init__(self, config):
         super(CROSS, self).__init__()
 
-        self.eps = eps
-        self.scalar = scalar
+        in_dim = config.in_dim
+        hid_dim = config.hid_dim
+        num_layers = config.num_layers
+        num_heads = config.num_heads
+        num_experts = config.num_experts
 
-        self.pooling = pooling
-        self.readout = readout
+        self.k = config.k
+        self.eps = config.eps
+        self.scalar = config.scalar
+        self.pooling = config.pooling
+        self.readout = config.readout
 
-        self.mask_threshold = mask_threshold
-
-        self.emb = None
         self.emb_dim = num_layers * hid_dim
 
         self.bwgnn_encoder = BWGNN(in_dim, self.emb_dim, self.emb_dim)
-        self.gin_encoder = GIN(in_dim, hid_dim, num_layers, pooling, readout)
+        self.gin_encoder = GIN(in_dim, hid_dim, num_layers, self.pooling, self.readout)
 
         self.graph_dense_layers = nn.ModuleList([nn.Linear(self.emb_dim, self.emb_dim),
                                                  nn.Linear(self.emb_dim, self.emb_dim)])
-        self.extractor = Explainer_GIN(self.emb_dim, self.emb_dim, num_layers, readout)
+        self.extractor = Explainer_GIN(self.emb_dim, self.emb_dim, num_layers, self.readout)
 
-        self.k = k
-        self.num_heads = num_heads
         self.prototype_codebooks = nn.Parameter(torch.rand(self.k, self.emb_dim))
 
-        self.cross_attn_low = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
-        self.cross_attn_high = CrossAttention(d_model=self.emb_dim, num_heads=self.num_heads)
+        self.cross_attn_low = CrossAttention(d_model=self.emb_dim, num_heads=num_heads)
+        self.cross_attn_high = CrossAttention(d_model=self.emb_dim, num_heads=num_heads)
 
         self.in_self_attn = SelfAttention(d_model=in_dim, num_heads=1)
         self.shared_self_attn = SelfAttention(d_model=self.emb_dim, num_heads=1)
@@ -67,13 +53,12 @@ class CROSS(nn.Module):
 
         self.moe = MMoE(in_dim=in_dim,
                         num_experts=num_experts,
-                        expert_dim=expert_dim,
+                        expert_dim=hid_dim,
                         num_tasks=2,
                         task_dim=self.emb_dim,
                         hid_dim=hid_dim,
                         out_dim=self.emb_dim,
                         gnn_layers=num_layers)
-
 
         self.norm = nn.BatchNorm1d(in_dim)
 
@@ -132,12 +117,12 @@ class CROSS(nn.Module):
         sim = x @ self.prototype_codebooks.T  # [N, K]
         labels = sim.argmax(dim=1)  # [N,]
         # 2.基于 L2 距离
-        distances = (
-            torch.sum(x ** 2, dim=1, keepdim=True)  # [N, 1]
-            + torch.sum(self.prototype_codebooks ** 2, dim=1)  # [K,]
-            - 2 * torch.matmul(x, self.prototype_codebooks.t())  # [N, K]
-        )
-        labels = torch.argmin(distances, dim=1)  # [N,]
+        # distances = (
+        #     torch.sum(x ** 2, dim=1, keepdim=True)  # [N, 1]
+        #     + torch.sum(self.prototype_codebooks ** 2, dim=1)  # [K,]
+        #     - 2 * torch.matmul(x, self.prototype_codebooks.t())  # [N, K]
+        # )
+        # labels = torch.argmin(distances, dim=1)  # [N,]
 
         # 计算利用率
         # encodings = F.one_hot(labels, self.k).type(x.dtype)  # [N, K]
@@ -176,18 +161,18 @@ class CROSS(nn.Module):
         # gh = self.pool(nh, batch)  # [g, md]
         # gl, nl = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
 
-        # task_outs_g, task_outs_n = self.moe(x, edge_index, batch)
-        _, task_outs_n = self.moe(x, edge_index, batch)
-        # gh, gl = task_outs_g
+        task_outs_g, task_outs_n = self.moe(x, edge_index, batch)
+        # _, task_outs_n = self.moe(x, edge_index, batch)
+        gh, gl = task_outs_g
         # nh, nl = task_outs_n
 
-        task_sub_g = []
-        for i, nx in enumerate(task_outs_n):
-            node_prob = self.extractor(nx, edge_index, batch)
-            sub_nx = self.node_masking(nx, node_prob, batch)
-            sub_gx = self.graph_dense_layers[i](global_mean_pool(sub_nx, batch))
-            task_sub_g.append(sub_gx)
-        gh, gl = task_sub_g
+        # task_sub_g = []
+        # for i, nx in enumerate(task_outs_n):
+        #     node_prob = self.extractor(nx, edge_index, batch)
+        #     sub_nx = self.node_masking(nx, node_prob, batch)
+        #     sub_gx = self.graph_dense_layers[i](global_mean_pool(sub_nx, batch))
+        #     task_sub_g.append(sub_gx)
+        # gh, gl = task_sub_g
 
         # 图内注意力
         # attn_gh = self.self_attn_pool(nh, batch)

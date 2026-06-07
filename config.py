@@ -22,8 +22,8 @@ class Config:
     # ============== 模型结构 ==============
     rw_dim: int = 16
     dg_dim: int = 16
-    num_layer: int = 5
-    hidden_dim: int = 64
+    num_layers: int = 5
+    hid_dim: int = 64
     lr: int = 1e-5
     temperature: int = 0.7
     dropout: float = 0.1
@@ -50,6 +50,10 @@ class Config:
     kmeans_init: bool = True
     kmeans_init_num_batches: int = 5
 
+    # ============== VQVAE ==============
+    commitment_cost = 0.25
+    vq_decay = 0.99
+    vq_epsilon = 1e-5
 
 def parse_args() -> Config:
     """解析命令行参数，映射到 Config"""
