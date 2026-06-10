@@ -76,9 +76,18 @@ class CROSS(nn.Module):
         # self.decoder = GIN(self.emb_dim, hid_dim, num_layers, pooling, readout)
         self.dec_proj_high = nn.Linear(self.emb_dim, self.emb_dim)
         self.dec_proj_low = nn.Linear(self.emb_dim, self.emb_dim)
+        self.dec_proj_layers = nn.ModuleList([nn.Linear(self.emb_dim, self.emb_dim),
+                                              nn.Linear(self.emb_dim, self.emb_dim)])
 
-        # 重建
-        self.recon_loss = nn.MSELoss()
+        # VQ
+        commitment_cost = config.commitment_cost
+        vq_decay = config.vq_decay
+        vq_epsilon = config.vq_epsilon
+        self.vq = VectorQuantizerEMA(num_embeddings=self.k,
+                                     embedding_dim=self.emb_dim,
+                                     commitment_cost=commitment_cost,
+                                     decay=vq_decay,
+                                     epsilon=vq_epsilon)
 
         self.init_emb()
 
@@ -163,40 +172,54 @@ class CROSS(nn.Module):
 
         task_outs_g, task_outs_n = self.moe(x, edge_index, batch)
         # _, task_outs_n = self.moe(x, edge_index, batch)
-        gh, gl = task_outs_g
+        # gh, gl = task_outs_g
         # nh, nl = task_outs_n
 
-        # task_sub_g = []
-        # for i, nx in enumerate(task_outs_n):
-        #     node_prob = self.extractor(nx, edge_index, batch)
-        #     sub_nx = self.node_masking(nx, node_prob, batch)
-        #     sub_gx = self.graph_dense_layers[i](global_mean_pool(sub_nx, batch))
-        #     task_sub_g.append(sub_gx)
-        # gh, gl = task_sub_g
+        task_sub_g = []
+        for i, nx in enumerate(task_outs_n):
+            node_prob = self.extractor(nx, edge_index, batch)
+            sub_nx = self.node_masking(nx, node_prob, batch)
+            sub_gx = self.graph_dense_layers[i](global_mean_pool(sub_nx, batch))
+            task_sub_g.append(sub_gx)
+        gh, gl = task_sub_g
 
         # 图内注意力
         # attn_gh = self.self_attn_pool(nh, batch)
         # attn_gl = self.self_attn_pool(nl, batch)
 
-        cross_gh, _ = self.cross_attn_high(gh, self.prototype_codebooks, self.prototype_codebooks)
-        cross_gl, _ = self.cross_attn_low(gl, self.prototype_codebooks, self.prototype_codebooks)
+        cross_gh, _ = self.cross_attn_high(gh, self.vq.embedding.weight, self.vq.embedding.weight)
+        cross_gl, _ = self.cross_attn_low(gl, self.vq.embedding.weight, self.vq.embedding.weight)
 
         cross_gh = self.norm_high(cross_gh)
         cross_gl = self.norm_low(cross_gl)
 
-        hp = self.allocate_prototype(cross_gh)
-        lp = self.allocate_prototype(cross_gl)
+        vq_loss = 0
+        perplexity_list = []
+        recon_list = []
+        z_q_list = []
+        for i, z_e in enumerate(task_outs_n):  # [N, D]
+            z_q, vq_loss_item, _, perplexity = self.vq(z_e)  # [N, D] -> [N, D]
+            rec = self.dec_proj_layers[i](z_q)  # [N, D] -> [N, D]
+            # 统计
+            vq_loss += vq_loss_item
+            perplexity_list.append(perplexity)
+            recon_list.append(rec)
+            # node -> graph
+            g_z_q = self.graph_dense_layers[i](global_mean_pool(z_q, batch))
+            z_q_list.append(g_z_q)
 
-        h_rec = self.dec_proj_high(hp)
-        l_rec = self.dec_proj_low(lp)
+        h_rec, l_rec = recon_list  # [N, D]
+        recon_loss = F.mse_loss(h_rec, task_outs_n[0]) + F.mse_loss(l_rec, task_outs_n[1])
 
-        # return gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl
-        return gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec
+        return gh, gl, cross_gh, cross_gl, z_q_list, recon_loss, vq_loss, perplexity_list
 
     def loss_func(self, emb_list, batch, t):
 
         # gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl = emb_list
-        gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
+        # gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
+        gh, gl, cross_gh, cross_gl, z_q_list, _, _, _ = emb_list
+
+        hp, lp = z_q_list
 
         loss_ii = self.gcl_loss_g(cross_gh, cross_gl, t) + self.gcl_loss_g(gh, gl, t)
         # loss_ii += self.gcl_loss_g(attn_gh, attn_gl, t)
@@ -212,7 +235,10 @@ class CROSS(nn.Module):
     def score_func(self, emb_list, batch, t):
 
         # gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl = emb_list
-        gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
+        # gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
+        gh, gl, cross_gh, cross_gl, z_q_list, _, _, _ = emb_list
+
+        hp, lp = z_q_list
 
         score_ii = self.gcl_loss_g(cross_gh, cross_gl, t) + self.gcl_loss_g(gh, gl, t)
         # score_ii += self.gcl_loss_g(attn_gh, attn_gl, t)
@@ -220,8 +246,8 @@ class CROSS(nn.Module):
         score_pp = torch.tensor([0.]).to(batch.device)
         score_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
 
-        score_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
-        # score_recon = torch.tensor([0.]).to(batch.device)
+        # score_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
+        score_recon = torch.tensor([0.]).to(batch.device)
 
         return score_ii, score_pp, score_ip, score_recon
 
