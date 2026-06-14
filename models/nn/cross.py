@@ -5,7 +5,7 @@ import torch_scatter
 
 from .gin import GIN
 from .bwgnn import BWGNN
-from .attention import CrossAttention, SelfAttention
+from .attention import CrossAttention, SelfAttention, DoubleCrossAttention
 from .moe import MMoE
 from .vqvae import VectorQuantizerEMA
 from torch_geometric.utils import subgraph
@@ -47,6 +47,9 @@ class CROSS(nn.Module):
         self.cross_attn_low = CrossAttention(d_model=self.emb_dim, num_heads=num_heads)
         self.cross_attn_high = CrossAttention(d_model=self.emb_dim, num_heads=num_heads)
 
+        self.cross_g = DoubleCrossAttention(d_model=self.emb_dim, device=config.device)
+        self.cross_n = DoubleCrossAttention(d_model=self.emb_dim, device=config.device)
+
         self.in_self_attn = SelfAttention(d_model=in_dim, num_heads=1)
         self.shared_self_attn = SelfAttention(d_model=self.emb_dim, num_heads=1)
         self.self_attn_low = SelfAttention(d_model=self.emb_dim, num_heads=1)
@@ -86,11 +89,18 @@ class CROSS(nn.Module):
         commitment_cost = config.commitment_cost
         vq_decay = config.vq_decay
         vq_epsilon = config.vq_epsilon
-        self.vq = VectorQuantizerEMA(num_embeddings=self.k,
-                                     embedding_dim=self.emb_dim,
-                                     commitment_cost=commitment_cost,
-                                     decay=vq_decay,
-                                     epsilon=vq_epsilon)
+        vq1 = VectorQuantizerEMA(num_embeddings=self.k,
+                                embedding_dim=self.emb_dim,
+                                commitment_cost=commitment_cost,
+                                decay=vq_decay,
+                                epsilon=vq_epsilon)
+        vq2 = VectorQuantizerEMA(num_embeddings=self.k,
+                                embedding_dim=self.emb_dim,
+                                commitment_cost=commitment_cost,
+                                decay=vq_decay,
+                                epsilon=vq_epsilon)
+
+        self.vq = nn.ModuleList([vq1, vq2])
 
         self.init_emb()
 
@@ -176,44 +186,37 @@ class CROSS(nn.Module):
         # task_sub_g, task_outs_n = self.moe(x, x_s, edge_index, batch)
 
         task_sub_g = []
+        task_sub_n = []
         for i, nx in enumerate(task_outs_n):
             node_prob = self.extractor(nx, edge_index, batch)
             sub_nx = self.node_masking(nx, node_prob, batch)
             sub_gx = self.graph_dense_layers[i](global_mean_pool(sub_nx, batch))
             task_sub_g.append(sub_gx)
-        gh, gl = task_sub_g
+        gf, gs = task_sub_g
 
-        cross_gh, _ = self.cross_attn_high(gh, self.vq.embedding.weight, self.vq.embedding.weight)
-        cross_gl, _ = self.cross_attn_low(gl, self.vq.embedding.weight, self.vq.embedding.weight)
+        # cross_gf = self.cross_attn_high(gf, self.vq.embedding.weight, self.vq.embedding.weight)
+        # cross_gs = self.cross_attn_low(gs, self.vq.embedding.weight, self.vq.embedding.weight)
+        cross_gf, cross_gs = self.cross_g(gf, gs)
 
-        cross_gh = self.norm_high(cross_gh)
-        cross_gl = self.norm_low(cross_gl)
-
-        vq_loss = 0
-        perplexity_list = []
-        recon_list = []
+        recon_loss = vq_loss = 0
         z_q_list = []
         for i, z_e in enumerate(task_outs_n):  # [N, D]
-            z_q, vq_loss_item, _, perplexity = self.vq(z_e)  # [N, D] -> [N, D]
+            z_q, vq_loss_item, _, _ = self.vq[i](z_e)  # [N, D] -> [N, D]
             rec = self.dec_proj_layers[i](z_q)  # [N, D] -> [N, D]
             # 统计
             vq_loss += vq_loss_item
-            perplexity_list.append(perplexity)
-            recon_list.append(rec)
+            recon_loss += F.mse_loss(z_e, rec)
             # node -> graph
             g_z_q = self.graph_dense_layers[i](global_mean_pool(z_q, batch))
             z_q_list.append(g_z_q)
 
-        h_rec, l_rec = recon_list  # [N, D]
-        recon_loss = F.mse_loss(h_rec, task_outs_n[0]) + F.mse_loss(l_rec, task_outs_n[1])
-
-        return gh, gl, cross_gh, cross_gl, z_q_list, recon_loss, vq_loss, perplexity_list
+        return gf, gs, cross_gf, cross_gs, z_q_list, recon_loss, vq_loss
 
     def loss_func(self, emb_list, batch, t):
 
         # gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl = emb_list
         # gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
-        gh, gl, cross_gh, cross_gl, z_q_list, _, _, _ = emb_list
+        gh, gl, cross_gh, cross_gl, z_q_list, _, _ = emb_list
 
         hp, lp = z_q_list
 
@@ -232,7 +235,7 @@ class CROSS(nn.Module):
 
         # gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl = emb_list
         # gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
-        gh, gl, cross_gh, cross_gl, z_q_list, _, _, _ = emb_list
+        gh, gl, cross_gh, cross_gl, z_q_list, _, _ = emb_list
 
         hp, lp = z_q_list
 

@@ -74,7 +74,7 @@ class CrossDetector:
         model = self.init_model()
 
         # 训练前，先做一次KMeans码本初始化
-        self.initialize_codebook(model, dataloader)
+        # self.initialize_codebook(model, dataloader)
 
         # optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
         optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr)
@@ -93,8 +93,8 @@ class CrossDetector:
                 optimizer.zero_grad()
                 emb = model(data)
 
-                vq_loss = emb[-2]
-                recon_loss = emb[-3]
+                vq_loss = emb[-1]
+                recon_loss = emb[-2]
 
                 loss_ii, loss_pp, loss_ip, loss_rec = model.loss_func(emb, data.batch, self.temperature)
                 loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean() + loss_rec.mean() + vq_loss + recon_loss
@@ -112,8 +112,8 @@ class CrossDetector:
                 for data in dataloader_val:
                     data = data.to(self.device)
                     emb = model(data)
-                    vq = emb[-2]
-                    recon = emb[-3]
+                    vq = emb[-1]
+                    recon = emb[-2]
                     s_ii, s_pp, s_ip, s_rec = model.score_func(emb, data.batch, self.temperature)
                     # score.extend( s.cpu().tolist() )
                     score.extend( (s_ii + s_pp + s_ip + s_rec + vq + recon).cpu().tolist() )
@@ -149,8 +149,8 @@ class CrossDetector:
                 # visualize_attention(h_cross_scores, title="High Cross Attention")
                 # visualize_attention(l_cross_scores, title="Low Cross Attention")
 
-                vq = emb[-2]
-                recon = emb[-3]
+                vq = emb[-1]
+                recon = emb[-2]
 
                 s_ii, s_pp, s_ip, s_rec = model.score_func(emb, data.batch, self.temperature)
                 # score.extend( s.cpu().tolist() )
