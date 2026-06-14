@@ -21,6 +21,7 @@ class CROSS(nn.Module):
         super(CROSS, self).__init__()
 
         in_dim = config.in_dim
+        in_str_dim = config.in_str_dim
         hid_dim = config.hid_dim
         num_layers = config.num_layers
         num_heads = config.num_heads
@@ -52,6 +53,7 @@ class CROSS(nn.Module):
         self.self_attn_high = SelfAttention(d_model=self.emb_dim, num_heads=1)
 
         self.moe = MMoE(in_dim=in_dim,
+                        in_str_dim=in_str_dim,
                         num_experts=num_experts,
                         expert_dim=hid_dim,
                         num_tasks=2,
@@ -60,7 +62,8 @@ class CROSS(nn.Module):
                         out_dim=self.emb_dim,
                         gnn_layers=num_layers)
 
-        self.norm = nn.BatchNorm1d(in_dim)
+        self.feat_norm = nn.BatchNorm1d(in_dim)
+        self.str_norm = nn.BatchNorm1d(in_str_dim)
 
         self.norm_low = nn.BatchNorm1d(self.emb_dim)
         self.norm_high = nn.BatchNorm1d(self.emb_dim)
@@ -162,18 +165,15 @@ class CROSS(nn.Module):
 
     def forward(self, data):
 
-        x, edge_index, batch, num_graphs, num_nodes = data.x, data.edge_index, data.batch, data.num_graphs, data.num_nodes
-
-        x = self.norm(x)
+        x, x_s, edge_index, batch = data.x, data.x_s, data.edge_index, data.batch
+        x, x_s = self.feat_norm(x), self.str_norm(x_s)
 
         # nh = self.bwgnn_encoder(x, edge_index)  # [n, md]
         # gh = self.pool(nh, batch)  # [g, md]
         # gl, nl = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
 
-        task_outs_g, task_outs_n = self.moe(x, edge_index, batch)
-        # _, task_outs_n = self.moe(x, edge_index, batch)
-        # gh, gl = task_outs_g
-        # nh, nl = task_outs_n
+        _, task_outs_n = self.moe(x, x_s, edge_index, batch)
+        # task_sub_g, task_outs_n = self.moe(x, x_s, edge_index, batch)
 
         task_sub_g = []
         for i, nx in enumerate(task_outs_n):
@@ -182,10 +182,6 @@ class CROSS(nn.Module):
             sub_gx = self.graph_dense_layers[i](global_mean_pool(sub_nx, batch))
             task_sub_g.append(sub_gx)
         gh, gl = task_sub_g
-
-        # 图内注意力
-        # attn_gh = self.self_attn_pool(nh, batch)
-        # attn_gl = self.self_attn_pool(nl, batch)
 
         cross_gh, _ = self.cross_attn_high(gh, self.vq.embedding.weight, self.vq.embedding.weight)
         cross_gl, _ = self.cross_attn_low(gl, self.vq.embedding.weight, self.vq.embedding.weight)
