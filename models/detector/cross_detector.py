@@ -96,14 +96,14 @@ class CrossDetector:
                 vq_loss = emb[-2]
                 recon_loss = emb[-3]
 
-                loss_ii, loss_pp, loss_ip, loss_rec = model.loss_func(emb, data.batch, self.temperature)
-                loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean() + loss_rec.mean() + vq_loss + recon_loss
+                loss_ii, loss_pp, loss_ip = model.loss_func(emb, data.batch, self.temperature)
+                loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean() + vq_loss.mean() + recon_loss.mean()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 optimizer.step()
                 total_mean_loss += loss.item()
-                total_mean_vq_loss += vq_loss
-                total_mean_rec_loss += recon_loss
+                total_mean_vq_loss += vq_loss.mean()
+                total_mean_rec_loss += recon_loss.mean()
                 total_loss += loss.item() * data.num_graphs
 
             if epoch % self.config.eval_freq == 0:
@@ -114,10 +114,9 @@ class CrossDetector:
                     emb = model(data)
                     vq = emb[-2]
                     recon = emb[-3]
-                    s_ii, s_pp, s_ip, s_rec = model.score_func(emb, data.batch, self.temperature)
+                    s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
                     # score.extend( s.cpu().tolist() )
-                    score.extend( (s_ii + s_pp + s_ip + s_rec + vq + recon).cpu().tolist() )
-                    # score.extend( (s_ii + s_pp + s_ip + s_rec).cpu().tolist() )
+                    score.extend( (s_ii + s_pp + s_ip + vq + recon).cpu().tolist() )
                     y.extend(data.y.cpu().tolist())
 
                 auc = ood_auc(y, score)
@@ -152,10 +151,9 @@ class CrossDetector:
                 vq = emb[-2]
                 recon = emb[-3]
 
-                s_ii, s_pp, s_ip, s_rec = model.score_func(emb, data.batch, self.temperature)
+                s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
                 # score.extend( s.cpu().tolist() )
-                score.extend( (s_ii + s_pp + s_ip + s_rec + vq + recon).cpu().tolist() )
-                # score.extend( (s_ii + s_pp + s_ip + s_rec).cpu().tolist() )
+                score.extend( (s_ii + s_pp + s_ip + vq + recon).cpu().tolist() )
                 y.extend(data.y.cpu().tolist())
 
         return score, y

@@ -171,21 +171,8 @@ class CROSS(nn.Module):
         # gl, nl = self.gin_encoder(x, edge_index, batch)  # [g, md], [n, md]
 
         task_outs_g, task_outs_n = self.moe(x, edge_index, batch)
-        # _, task_outs_n = self.moe(x, edge_index, batch)
-        # gh, gl = task_outs_g
+        gh, gl = task_outs_g
         # nh, nl = task_outs_n
-
-        task_sub_g = []
-        for i, nx in enumerate(task_outs_n):
-            node_prob = self.extractor(nx, edge_index, batch)
-            sub_nx = self.node_masking(nx, node_prob, batch)
-            sub_gx = self.graph_dense_layers[i](global_mean_pool(sub_nx, batch))
-            task_sub_g.append(sub_gx)
-        gh, gl = task_sub_g
-
-        # 图内注意力
-        # attn_gh = self.self_attn_pool(nh, batch)
-        # attn_gl = self.self_attn_pool(nl, batch)
 
         cross_gh, _ = self.cross_attn_high(gh, self.vq.embedding.weight, self.vq.embedding.weight)
         cross_gl, _ = self.cross_attn_low(gl, self.vq.embedding.weight, self.vq.embedding.weight)
@@ -193,25 +180,27 @@ class CROSS(nn.Module):
         cross_gh = self.norm_high(cross_gh)
         cross_gl = self.norm_low(cross_gl)
 
-        vq_loss = 0
+        vq_loss = []
         perplexity_list = []
-        recon_list = []
+        recon_loss = []
         z_q_list = []
         for i, z_e in enumerate(task_outs_n):  # [N, D]
-            z_q, vq_loss_item, _, perplexity = self.vq(z_e)  # [N, D] -> [N, D]
+            z_q, vq_per_node, _, perplexity = self.vq(z_e)  # [N, D] -> [N, D]
             rec = self.dec_proj_layers[i](z_q)  # [N, D] -> [N, D]
             # 统计
-            vq_loss += vq_loss_item
+            vq_loss_item = global_mean_pool(vq_per_node.unsqueeze(1), batch).squeeze(1)  # [G]
+            vq_loss.append(vq_loss_item)
             perplexity_list.append(perplexity)
-            recon_list.append(rec)
+            rec_loss_per_node = F.mse_loss(rec, z_e, reduction='none').mean(dim=1)  # [N]
+            rec_loss_per_item = global_mean_pool(rec_loss_per_node.unsqueeze(1), batch).squeeze(1)  # [G]
+            recon_loss.append(rec_loss_per_item)
             # node -> graph
             g_z_q = self.graph_dense_layers[i](global_mean_pool(z_q, batch))
             z_q_list.append(g_z_q)
 
-        h_rec, l_rec = recon_list  # [N, D]
-        recon_loss = F.mse_loss(h_rec, task_outs_n[0]) + F.mse_loss(l_rec, task_outs_n[1])
-
-        return gh, gl, cross_gh, cross_gl, z_q_list, recon_loss, vq_loss, perplexity_list
+        final_vq_loss = vq_loss[0] + vq_loss[1]
+        final_recon_loss = recon_loss[0] + recon_loss[1]
+        return gh, gl, cross_gh, cross_gl, z_q_list, final_recon_loss, final_vq_loss, perplexity_list
 
     def loss_func(self, emb_list, batch, t):
 
@@ -227,10 +216,7 @@ class CROSS(nn.Module):
         loss_pp = torch.tensor([0.]).to(batch.device)
         loss_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
 
-        # loss_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
-        loss_recon = torch.tensor([0.]).to(batch.device)
-
-        return loss_ii, loss_pp, loss_ip, loss_recon
+        return loss_ii, loss_pp, loss_ip
 
     def score_func(self, emb_list, batch, t):
 
@@ -246,10 +232,7 @@ class CROSS(nn.Module):
         score_pp = torch.tensor([0.]).to(batch.device)
         score_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
 
-        # score_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
-        score_recon = torch.tensor([0.]).to(batch.device)
-
-        return score_ii, score_pp, score_ip, score_recon
+        return score_ii, score_pp, score_ip
 
     @staticmethod
     def gcl_loss_n(x, x_aug, batch, temperature=0.2):
