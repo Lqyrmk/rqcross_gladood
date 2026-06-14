@@ -190,65 +190,62 @@ class CROSS(nn.Module):
         for i, nx in enumerate(task_outs_n):
             node_prob = self.extractor(nx, edge_index, batch)
             sub_nx = self.node_masking(nx, node_prob, batch)
+            task_sub_n.append(sub_nx)
             sub_gx = self.graph_dense_layers[i](global_mean_pool(sub_nx, batch))
             task_sub_g.append(sub_gx)
         gf, gs = task_sub_g
+        nf, ns = task_sub_n
 
         # cross_gf = self.cross_attn_high(gf, self.vq.embedding.weight, self.vq.embedding.weight)
         # cross_gs = self.cross_attn_low(gs, self.vq.embedding.weight, self.vq.embedding.weight)
         cross_gf, cross_gs = self.cross_g(gf, gs)
+        cross_nf, cross_ns = self.cross_n(nf, ns)
 
         recon_loss = vq_loss = 0
         z_q_list = []
-        for i, z_e in enumerate(task_outs_n):  # [N, D]
-            z_q, vq_loss_item, _, _ = self.vq[i](z_e)  # [N, D] -> [N, D]
-            rec = self.dec_proj_layers[i](z_q)  # [N, D] -> [N, D]
-            # 统计
-            vq_loss += vq_loss_item
-            recon_loss += F.mse_loss(z_e, rec)
-            # node -> graph
-            g_z_q = self.graph_dense_layers[i](global_mean_pool(z_q, batch))
-            z_q_list.append(g_z_q)
+        # for i, z_e in enumerate(task_outs_n):  # [N, D]
+        #     z_q, vq_loss_item, _, _ = self.vq[i](z_e)  # [N, D] -> [N, D]
+        #     rec = self.dec_proj_layers[i](z_q)  # [N, D] -> [N, D]
+        #     # 统计
+        #     vq_loss += vq_loss_item
+        #     recon_loss += F.mse_loss(z_e, rec)
+        #     # node -> graph
+        #     g_z_q = self.graph_dense_layers[i](global_mean_pool(z_q, batch))
+        #     z_q_list.append(g_z_q)
 
-        return gf, gs, cross_gf, cross_gs, z_q_list, recon_loss, vq_loss
+        return gf, gs, cross_gf, cross_gs, cross_nf, cross_ns, z_q_list, recon_loss, vq_loss
 
     def loss_func(self, emb_list, batch, t):
 
-        # gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl = emb_list
-        # gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
-        gh, gl, cross_gh, cross_gl, z_q_list, _, _ = emb_list
+        gh, gl, cross_gh, cross_gl, cross_nf, cross_ns, z_q_list, _, _ = emb_list
 
-        hp, lp = z_q_list
+        # hp, lp = z_q_list
 
         loss_ii = self.gcl_loss_g(cross_gh, cross_gl, t) + self.gcl_loss_g(gh, gl, t)
-        # loss_ii += self.gcl_loss_g(attn_gh, attn_gl, t)
+        loss_ii += self.gcl_loss_n(cross_nf, cross_ns, batch, t)
+        # loss_ii = self.gcl_loss_g(cross_gh, cross_gl, t)
         # loss_pp = self.gcl_loss_g(hp, lp, t)
         loss_pp = torch.tensor([0.]).to(batch.device)
-        loss_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
+        # loss_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
+        loss_ip = torch.tensor([0.]).to(batch.device)
 
-        # loss_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
-        loss_recon = torch.tensor([0.]).to(batch.device)
-
-        return loss_ii, loss_pp, loss_ip, loss_recon
+        return loss_ii, loss_pp, loss_ip
 
     def score_func(self, emb_list, batch, t):
 
-        # gh, gl, cross_gh, cross_gl, hp, lp, attn_gh, attn_gl = emb_list
-        # gh, gl, cross_gh, cross_gl, hp, lp, h_rec, l_rec = emb_list
-        gh, gl, cross_gh, cross_gl, z_q_list, _, _ = emb_list
+        gh, gl, cross_gh, cross_gl, cross_nf, cross_ns, z_q_list, _, _ = emb_list
 
-        hp, lp = z_q_list
+        # hp, lp = z_q_list
 
         score_ii = self.gcl_loss_g(cross_gh, cross_gl, t) + self.gcl_loss_g(gh, gl, t)
-        # score_ii += self.gcl_loss_g(attn_gh, attn_gl, t)
+        score_ii += self.gcl_loss_n(cross_nf, cross_ns, batch, t)
+        # score_ii = self.gcl_loss_g(cross_gh, cross_gl, t)
         # score_pp = self.gcl_loss_g(hp, lp, t)
         score_pp = torch.tensor([0.]).to(batch.device)
-        score_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
+        # score_ip = self.gcl_loss_g(cross_gh, hp, t) + self.gcl_loss_g(cross_gl, lp, t)
+        score_ip = torch.tensor([0.]).to(batch.device)
 
-        # score_recon = self.recon_loss(cross_gh, h_rec) + self.recon_loss(cross_gl, l_rec)
-        score_recon = torch.tensor([0.]).to(batch.device)
-
-        return score_ii, score_pp, score_ip, score_recon
+        return score_ii, score_pp, score_ip
 
     @staticmethod
     def gcl_loss_n(x, x_aug, batch, temperature=0.2):

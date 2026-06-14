@@ -96,8 +96,8 @@ class CrossDetector:
                 vq_loss = emb[-1]
                 recon_loss = emb[-2]
 
-                loss_ii, loss_pp, loss_ip, loss_rec = model.loss_func(emb, data.batch, self.temperature)
-                loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean() + loss_rec.mean() + vq_loss + recon_loss
+                loss_ii, loss_pp, loss_ip = model.loss_func(emb, data.batch, self.temperature)
+                loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean() + vq_loss + recon_loss
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 optimizer.step()
@@ -114,10 +114,9 @@ class CrossDetector:
                     emb = model(data)
                     vq = emb[-1]
                     recon = emb[-2]
-                    s_ii, s_pp, s_ip, s_rec = model.score_func(emb, data.batch, self.temperature)
+                    s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
                     # score.extend( s.cpu().tolist() )
-                    score.extend( (s_ii + s_pp + s_ip + s_rec + vq + recon).cpu().tolist() )
-                    # score.extend( (s_ii + s_pp + s_ip + s_rec).cpu().tolist() )
+                    score.extend( (s_ii + s_pp + s_ip + vq + recon).cpu().tolist() )
                     y.extend(data.y.cpu().tolist())
 
                 auc = ood_auc(y, score)
@@ -152,10 +151,9 @@ class CrossDetector:
                 vq = emb[-1]
                 recon = emb[-2]
 
-                s_ii, s_pp, s_ip, s_rec = model.score_func(emb, data.batch, self.temperature)
+                s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
                 # score.extend( s.cpu().tolist() )
-                score.extend( (s_ii + s_pp + s_ip + s_rec + vq + recon).cpu().tolist() )
-                # score.extend( (s_ii + s_pp + s_ip + s_rec).cpu().tolist() )
+                score.extend( (s_ii + s_pp + s_ip + vq + recon).cpu().tolist() )
                 y.extend(data.y.cpu().tolist())
 
         return score, y
