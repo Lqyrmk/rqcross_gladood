@@ -50,6 +50,7 @@ class MMoE(nn.Module):
     def __init__(
         self,
         in_dim,
+        in_str_dim,
         num_experts,
         expert_dim,
         num_tasks,
@@ -59,6 +60,8 @@ class MMoE(nn.Module):
         gnn_layers
     ):
         super().__init__()
+
+        cat_in_dim = in_dim + in_str_dim
 
         self.num_tasks = num_tasks
 
@@ -71,24 +74,25 @@ class MMoE(nn.Module):
         enc_out_dim = hid_dim * gnn_layers
 
         for _ in range(self.num_hf):
-            hf_encoder = HfEncoder(in_dim, hid_dim, enc_out_dim)
+            hf_encoder = HfEncoder(cat_in_dim, hid_dim, enc_out_dim)
             self.experts.append(Expert(hf_encoder, enc_out_dim, expert_dim))
         for _ in range(self.num_lf):
-            lf_encoder = LfEncoder(in_dim, hid_dim, gnn_layers)
+            lf_encoder = LfEncoder(cat_in_dim, hid_dim, gnn_layers)
             self.experts.append(Expert(lf_encoder, enc_out_dim, expert_dim))
 
         # 共享专家
-        shared_hf_expert = HfEncoder(in_dim, hid_dim, enc_out_dim)
+        shared_hf_expert = HfEncoder(cat_in_dim, hid_dim, enc_out_dim)
         self.experts.append(Expert(shared_hf_expert, enc_out_dim, expert_dim))
         num_experts += 1
 
         # 全 bwgnn 效果也不错
         # for _ in range(num_experts):
-        #     hf_encoder = HfEncoder(in_dim, hid_dim, enc_out_dim)
+        #     hf_encoder = HfEncoder(cat_in_dim, hid_dim, enc_out_dim)
         #     self.experts.append(Expert(hf_encoder, enc_out_dim, expert_dim))
 
         self.gates = nn.ModuleList([
-            nn.Linear(in_dim, num_experts) for _ in range(num_tasks)
+            nn.Linear(in_dim, num_experts),     # feat gate
+            nn.Linear(in_str_dim, num_experts)  # str gate
         ])
 
         self.task_towers = nn.ModuleList([
@@ -117,10 +121,10 @@ class MMoE(nn.Module):
                 if m.bias is not None:
                     init.zeros_(m.bias)
 
-    def task_forward(self, x, expert_outs):
-
+    def task_forward(self, task_x, expert_outs):
+        # task_x = [feat, str]
         task_outs = []
-        for i in range(self.num_tasks):
+        for i, x in enumerate(task_x):  # num_tasks
 
             gate_out = self.gates[i](x)
             gate_weight = F.softmax(gate_out, dim=-1)  # [N, E]
@@ -140,17 +144,23 @@ class MMoE(nn.Module):
             task_outs.append(out)
         return task_outs
 
-    def forward(self, x, edge_index, batch):
+    def forward(self, x, x_s, edge_index, batch):
 
+        # 混合特征进专家
+        mix_x = torch.concat([x, x_s], dim=1)
         expert_outs_n = []
         for expert in self.experts:
-            n_out = expert(x, edge_index, batch)
+            n_out = expert(mix_x, edge_index, batch)
             expert_outs_n.append(n_out)  # [N, d]
 
         expert_outs_n = torch.stack(expert_outs_n, dim=1)  # [N, E, d]
 
-        task_outs_n = self.task_forward(x, expert_outs_n)
+        # 特征独立求门控
+        task_x = [x, x_s]
+        assert len(task_x) == self.num_tasks, "num_tasks"
+        task_outs_n = self.task_forward(task_x, expert_outs_n)
 
-        task_outs_g = [self.graph_dense(global_mean_pool(x, batch)) for x in task_outs_n]
+        # task_outs_g = [self.graph_dense(global_mean_pool(x, batch)) for x in task_outs_n]
+        task_outs_g = None
 
         return task_outs_g, task_outs_n

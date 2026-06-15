@@ -74,7 +74,7 @@ class CrossDetector:
         model = self.init_model()
 
         # 训练前，先做一次KMeans码本初始化
-        self.initialize_codebook(model, dataloader)
+        # self.initialize_codebook(model, dataloader)
 
         # optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
         optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr)
@@ -93,17 +93,19 @@ class CrossDetector:
                 optimizer.zero_grad()
                 emb = model(data)
 
-                vq_loss = emb[-2]
-                recon_loss = emb[-3]
+                # vq_loss = emb[-1]
+                # recon_loss = emb[-2]
 
-                loss_ii, loss_pp, loss_ip = model.loss_func(emb, data.batch, self.temperature)
-                loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean() + vq_loss.mean() + recon_loss.mean()
+                # loss_ii, loss_pp, loss_ip = model.loss_func(emb, data.batch, self.temperature)
+                loss_ii, loss_pp = model.loss_func(emb, data.batch, self.temperature)
+                # loss = loss_ii.mean() + loss_pp.mean() + loss_ip.mean() + vq_loss + recon_loss
+                loss = loss_ii.mean() + loss_pp.mean()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 optimizer.step()
                 total_mean_loss += loss.item()
-                total_mean_vq_loss += vq_loss.mean()
-                total_mean_rec_loss += recon_loss.mean()
+                # total_mean_vq_loss += vq_loss
+                # total_mean_rec_loss += recon_loss
                 total_loss += loss.item() * data.num_graphs
 
             if epoch % self.config.eval_freq == 0:
@@ -112,11 +114,13 @@ class CrossDetector:
                 for data in dataloader_val:
                     data = data.to(self.device)
                     emb = model(data)
-                    vq = emb[-2]
-                    recon = emb[-3]
-                    s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
+                    # vq = emb[-1]
+                    # recon = emb[-2]
+                    # s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
+                    s_ii, s_pp = model.score_func(emb, data.batch, self.temperature)
                     # score.extend( s.cpu().tolist() )
-                    score.extend( (s_ii + s_pp + s_ip + vq + recon).cpu().tolist() )
+                    # score.extend( (s_ii + s_pp + s_ip + vq + recon).cpu().tolist() )
+                    score.extend( (s_ii + s_pp).cpu().tolist() )
                     y.extend(data.y.cpu().tolist())
 
                 auc = ood_auc(y, score)
@@ -148,12 +152,14 @@ class CrossDetector:
                 # visualize_attention(h_cross_scores, title="High Cross Attention")
                 # visualize_attention(l_cross_scores, title="Low Cross Attention")
 
-                vq = emb[-2]
-                recon = emb[-3]
+                # vq = emb[-1]
+                # recon = emb[-2]
 
-                s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
+                # s_ii, s_pp, s_ip = model.score_func(emb, data.batch, self.temperature)
+                s_ii, s_pp = model.score_func(emb, data.batch, self.temperature)
                 # score.extend( s.cpu().tolist() )
-                score.extend( (s_ii + s_pp + s_ip + vq + recon).cpu().tolist() )
+                # score.extend( (s_ii + s_pp + s_ip + vq + recon).cpu().tolist() )
+                score.extend( (s_ii + s_pp).cpu().tolist() )
                 y.extend(data.y.cpu().tolist())
 
         return score, y

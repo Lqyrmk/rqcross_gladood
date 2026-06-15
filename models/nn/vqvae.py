@@ -93,9 +93,8 @@ class VectorQuantizerEMA(nn.Module):
         z_q = z_e + (z_q - z_e).detach()
 
         # commitment loss
-        # e_latent_loss = F.mse_loss(z_q.detach(), z_e)
-        # loss = self.commitment_cost * e_latent_loss
-        loss = self.commitment_cost * F.mse_loss(z_q.detach(), z_e, reduction='none').mean(dim=1)  # [N]
+        e_latent_loss = F.mse_loss(z_q.detach(), z_e)
+        loss = self.commitment_cost * e_latent_loss
 
         # 统计每个 code 在当前 batch 中被使用的次数
         encodings = F.one_hot(indices, self.num_embeddings).type(z_e.dtype)  # [N, K]

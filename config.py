@@ -24,13 +24,14 @@ class Config:
     dg_dim: int = 16
     num_layers: int = 5
     hid_dim: int = 64
-    temperature: int = 0.5
+    lr: int = 1e-5
+    temperature: int = 0.7
     dropout: float = 0.1
     eps: float = 0.001
     scalar: float = 20
-    k: int = 50
-    num_heads: int = 2
-    num_experts: int = 3
+    k: int = 20
+    num_heads: int = 5
+    num_experts: int = 6
     pooling: str = 'mean'
     readout: str = 'concat'
 
@@ -38,7 +39,7 @@ class Config:
     batch_size: int = 128
     batch_size_test: int = 9999
     lr: float = 0.001
-    num_epoch: int = 400
+    num_epoch: int = 500
     num_trial: int = 5
     eval_freq: int = 5
     alpha: float = 1.0
@@ -51,7 +52,7 @@ class Config:
 
     # ============== VQVAE ==============
     commitment_cost = 0.25
-    vq_decay = 0.9
+    vq_decay = 0.99
     vq_epsilon = 1e-5
 
 def parse_args() -> Config:
