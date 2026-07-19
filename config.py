@@ -16,7 +16,7 @@ class Config:
     seed: int = 42
 
     # ============== 数据集 ==============
-    ad_dataset: str = "AIDS"
+    ad_dataset: str = "BZR"
     ood_dataset: str = "AIDS+DHFR"
 
     # ============== 模型结构 ==============

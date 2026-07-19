@@ -5,7 +5,7 @@ import torch_scatter
 
 from .gin import GIN
 from .bwgnn import BWGNN
-from .attention import CrossAttention, SelfAttention, DoubleCrossAttention
+from .attention import CrossAttention, SelfAttention, DoubleCrossAttention, DifferentialCrossAttention
 from .moe import MMoE
 from .vqvae import VectorQuantizerEMA
 from torch_geometric.utils import subgraph
@@ -102,11 +102,13 @@ class CROSS(nn.Module):
 
         self.vq = nn.ModuleList([vq1, vq2])
 
-
+        # cvtgad
         self.encoder_feat = GIN(in_dim, hid_dim, num_layers, self.pooling, self.readout)
         self.encoder_str = GIN(in_str_dim, hid_dim, num_layers, self.pooling, self.readout)
         self.Cross_Attention_g = DoubleCrossAttention(d_model=self.emb_dim, device=config.device)
         self.Cross_Attention_n = DoubleCrossAttention(d_model=self.emb_dim, device=config.device)
+        # self.Cross_Attention_g = DifferentialCrossAttention(d_model=self.emb_dim)
+        # self.Cross_Attention_n = DifferentialCrossAttention(d_model=self.emb_dim)
 
         self.graph_decoder = nn.Sequential(
             nn.Linear(self.emb_dim, self.emb_dim),

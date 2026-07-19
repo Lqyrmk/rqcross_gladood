@@ -153,29 +153,90 @@ class DoubleCrossAttention(nn.Module):
         B_K = self.B_w_ks(B_feat).permute(0, 2, 1)
         B_V = self.B_w_vs(B_feat)
 
-        A_attn = A_Q @ B_K
-        B_attn = B_Q @ A_K
+        A_attn = A_Q @ B_K / self.k
+        B_attn = B_Q @ A_K / self.k
 
-        A_attn /= self.k
-        B_attn /= self.k
+        self_A = A_Q @ A_K / self.k
+        self_B = B_Q @ B_K / self.k
 
-        A_attn = torch.softmax(A_attn, 2)
+        self_A = torch.softmax(self_A, 2)
+        self_A = self_A / (1e-9 + self_A.sum(dim=1, keepdims=True))
+        self_B = torch.softmax(self_B, 2)
+        self_B = self_B / (1e-9 + self_B.sum(dim=1, keepdims=True))
+
+        A_attn = torch.softmax(A_attn - self_A + self_B, 2)
         A_attention = A_attn / (1e-9 + A_attn.sum(dim=1, keepdims=True))
+        # A_sc = A_attention @ A_V + self_B @ B_V
         A_sc = A_attention @ A_V
 
-        B_attn = torch.softmax(B_attn, 2)
+        B_attn = torch.softmax(B_attn - self_B + self_A, 2)
         B_attention = B_attn / (1e-9 + B_attn.sum(dim=1, keepdims=True))
+        # B_sc = B_attention @ B_V + self_A @ A_V
         B_sc = B_attention @ B_V
 
         A_s = self.A_layer_norm(A_residual_feat + A_sc)
-        A_ffn = A_s + self.A_fc_ffn(A_s)
+        A_output = A_s + self.A_fc_ffn(A_s)
 
         B_s = self.B_layer_norm(B_residual_feat + B_sc)
-        B_ffn = B_s + self.B_fc_ffn(B_s)
-
-        A_output = A_ffn
-        B_output = B_ffn
+        B_output = B_s + self.B_fc_ffn(B_s)
 
         A_output = A_output.squeeze(0)
         B_output = B_output.squeeze(0)
         return A_output, B_output
+
+class DifferentialCrossAttention(nn.Module):
+    def __init__(self, d_model, lambda_init=1.0, gamma_init=1.0):
+        super().__init__()
+        self.d_model = d_model
+        self.k = d_model ** 0.5
+        self.lambda_ = nn.Parameter(torch.tensor(lambda_init))
+        self.gamma_ = nn.Parameter(torch.tensor(gamma_init))
+
+        # 视图A
+        self.A_proj = nn.Linear(d_model, d_model)
+        self.A_wq = nn.Linear(d_model, d_model, bias=False)
+        self.A_wk = nn.Linear(d_model, d_model, bias=False)
+        self.A_wv = nn.Linear(d_model, d_model, bias=False)
+        self.A_norm = nn.LayerNorm(d_model)
+        self.A_ffn = nn.Sequential(nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, d_model))
+
+        # 视图B (对称)
+        self.B_proj = nn.Linear(d_model, d_model)
+        self.B_wq = nn.Linear(d_model, d_model, bias=False)
+        self.B_wk = nn.Linear(d_model, d_model, bias=False)
+        self.B_wv = nn.Linear(d_model, d_model, bias=False)
+        self.B_norm = nn.LayerNorm(d_model)
+        self.B_ffn = nn.Sequential(nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, d_model))
+
+    def forward(self, feat_a, feat_b):
+        # feat_a, feat_b: [B, d] or [N, d]
+        a_proj = self.A_proj(feat_a)
+        b_proj = self.B_proj(feat_b)
+
+        Qa, Ka, Va = self.A_wq(a_proj), self.A_wk(a_proj), self.A_wv(a_proj)
+        Qb, Kb, Vb = self.B_wq(b_proj), self.B_wk(b_proj), self.B_wv(b_proj)
+
+        # 跨视图分数 & 自视图分数
+        cross_a = (Qa @ Kb.T) / self.k          # [B, B]
+        self_a  = (Qa @ Ka.T) / self.k          # [B, B]
+
+        cross_b = (Qb @ Ka.T) / self.k
+        self_b  = (Qb @ Kb.T) / self.k
+
+        # 自抑制：减去自身注意力
+        attn_a = torch.softmax(cross_a - self.lambda_ * self_a, dim=-1)
+        attn_b = torch.softmax(cross_b - self.lambda_ * self_b, dim=-1)
+
+        attn_a_with_b = torch.softmax(self_b, dim=-1)
+        attn_b_with_a = torch.softmax(self_a, dim=-1)
+
+        out_a = attn_a @ Vb + attn_a_with_b @ Vb
+        out_b = attn_b @ Va + attn_b_with_a @ Va
+
+        out_a = self.A_norm(a_proj + out_a)
+        out_a = out_a + self.A_ffn(out_a)
+
+        out_b = self.B_norm(b_proj + out_b)
+        out_b = out_b + self.B_ffn(out_b)
+
+        return out_a, out_b
