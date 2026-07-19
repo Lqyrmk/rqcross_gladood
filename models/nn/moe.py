@@ -73,22 +73,27 @@ class MMoE(nn.Module):
         # concat dimension
         enc_out_dim = hid_dim * gnn_layers
 
-        for _ in range(self.num_hf):
-            hf_encoder = HfEncoder(cat_in_dim, hid_dim, enc_out_dim)
-            self.experts.append(Expert(hf_encoder, enc_out_dim, expert_dim))
-        for _ in range(self.num_lf):
-            lf_encoder = LfEncoder(cat_in_dim, hid_dim, gnn_layers)
-            self.experts.append(Expert(lf_encoder, enc_out_dim, expert_dim))
+        # for _ in range(self.num_hf):
+        #     hf_encoder = HfEncoder(cat_in_dim, hid_dim, enc_out_dim)
+        #     self.experts.append(Expert(hf_encoder, enc_out_dim, expert_dim))
+        # for _ in range(self.num_lf):
+        #     lf_encoder = LfEncoder(cat_in_dim, hid_dim, gnn_layers)
+        #     self.experts.append(Expert(lf_encoder, enc_out_dim, expert_dim))
 
         # 共享专家
-        shared_hf_expert = HfEncoder(cat_in_dim, hid_dim, enc_out_dim)
-        self.experts.append(Expert(shared_hf_expert, enc_out_dim, expert_dim))
-        num_experts += 1
+        # shared_hf_expert = HfEncoder(cat_in_dim, hid_dim, enc_out_dim)
+        # self.experts.append(Expert(shared_hf_expert, enc_out_dim, expert_dim))
+        # num_experts += 1
 
         # 全 bwgnn 效果也不错
         # for _ in range(num_experts):
         #     hf_encoder = HfEncoder(cat_in_dim, hid_dim, enc_out_dim)
         #     self.experts.append(Expert(hf_encoder, enc_out_dim, expert_dim))
+
+        # gin
+        for _ in range(num_experts):
+            lf_encoder = LfEncoder(cat_in_dim, hid_dim, gnn_layers)
+            self.experts.append(Expert(lf_encoder, enc_out_dim, expert_dim))
 
         self.gates = nn.ModuleList([
             nn.Linear(in_dim, num_experts),     # feat gate
@@ -106,7 +111,10 @@ class MMoE(nn.Module):
             ) for _ in range(num_tasks)
         ])
 
-        self.graph_dense = nn.Linear(enc_out_dim, enc_out_dim)
+        self.graph_dense = nn.ModuleList([
+            nn.Linear(enc_out_dim, enc_out_dim)
+            for _ in range(num_tasks)
+        ])
 
         self.expert_norm = nn.BatchNorm1d(enc_out_dim)
         self.gate_dropout = nn.Dropout(0.2)
@@ -160,7 +168,6 @@ class MMoE(nn.Module):
         assert len(task_x) == self.num_tasks, "num_tasks"
         task_outs_n = self.task_forward(task_x, expert_outs_n)
 
-        # task_outs_g = [self.graph_dense(global_mean_pool(x, batch)) for x in task_outs_n]
-        task_outs_g = None
+        task_outs_g = [self.graph_dense[i](global_mean_pool(x, batch)) for i, x in enumerate(task_outs_n)]
 
         return task_outs_g, task_outs_n

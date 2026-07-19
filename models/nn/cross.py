@@ -107,6 +107,20 @@ class CROSS(nn.Module):
         self.encoder_str = GIN(in_str_dim, hid_dim, num_layers, self.pooling, self.readout)
         self.Cross_Attention_g = DoubleCrossAttention(d_model=self.emb_dim, device=config.device)
         self.Cross_Attention_n = DoubleCrossAttention(d_model=self.emb_dim, device=config.device)
+
+        self.graph_decoder = nn.Sequential(
+            nn.Linear(self.emb_dim, self.emb_dim),
+            nn.ReLU(),
+            nn.Linear(self.emb_dim, self.emb_dim * 2)   # 重构两个图级表示
+        )
+        self.node_decoder = nn.Sequential(
+            nn.Linear(self.emb_dim, hid_dim),
+            nn.ReLU(),
+            nn.Linear(hid_dim, in_dim + in_str_dim)
+        )
+
+        self.mi_discriminator = nn.Bilinear(self.emb_dim, self.emb_dim, 1)
+
         self.init_emb()
 
     def init_emb(self):
@@ -178,32 +192,68 @@ class CROSS(nn.Module):
         mask = self.process_probability(node_prob, batch)
         return x * mask
 
+    def fusion(self, x1, x2):
+        return x1 + x2
+
     def forward(self, data):
         x_f, x_s, edge_index, batch = data.x, data.x_s, data.edge_index, data.batch
         g_f, n_f = self.encoder_feat(x_f, edge_index, batch)
         g_s, n_s = self.encoder_str(x_s, edge_index, batch)
 
+        # moe 效果并不好，看看能不能对 gin 层做专家混合，选择特定gin层放到结果里，然后concat readout
+        # 层1选自gin1，层2选自gin4，层3选自gin2，层4选自gin5
+        # task_outs_g, task_outs_n = self.moe(x_f, x_s, edge_index, batch)
+        # g_f, g_s = task_outs_g
+        # n_f, n_s = task_outs_n
+
         g_f_2, g_s_2 = self.Cross_Attention_g(g_f, g_s)
 
         n_f_2, n_s_2 = self.Cross_Attention_n(n_f, n_s)
 
-        return g_f_2, g_s_2, n_f_2, n_s_2
+        g = self.fusion(g_f_2, g_s_2)
+        n = self.fusion(n_f_2, n_s_2)
+        g_rec = self.graph_decoder(g)          # 拆分为 (g_f_rec, g_s_rec)
+        n_rec = self.node_decoder(n)          # 拆分为 (x_f_rec, x_s_rec)
+
+        return g_f_2, g_s_2, n_f_2, n_s_2, torch.cat([g_f, g_s], dim=1), torch.cat([x_f, x_s], dim=1), g_rec, n_rec
+
 
     def loss_func(self, emb_list, batch, t):
 
-        g_f, g_s, n_f, n_s = emb_list
+        # g_f, g_s, n_f, n_s = emb_list
+        g_f, g_s, n_f, n_s, g, n, g_rec, n_rec = emb_list
         loss_g = self.gcl_loss_g(g_f, g_s)
         loss_n = self.gcl_loss_n(n_f, n_s, batch)
 
-        return loss_g, loss_n
+        rec_loss_g = F.mse_loss(g_rec, g, reduction='none')
+        rec_loss_n = F.mse_loss(n_rec, n, reduction='none')
+
+        mi_loss = self.mi_loss(n_f, g_f, batch) + self.mi_loss(n_s, g_s, batch)
+
+        return loss_g, loss_n, rec_loss_g, rec_loss_n, mi_loss
 
     def score_func(self, emb_list, batch, t):
 
-        g_f, g_s, n_f, n_s = emb_list
+        # g_f, g_s, n_f, n_s = emb_list
+        g_f, g_s, n_f, n_s, g, n, g_rec, n_rec = emb_list
         score_g = self.gcl_loss_g(g_f, g_s)
         score_n = self.gcl_loss_n(n_f, n_s, batch)
 
-        return score_g, score_n
+        recon_score_g = F.mse_loss(g_rec, g, reduction='none').mean(dim=1)
+        node_mse = F.mse_loss(n_rec, n, reduction='none').mean(dim=1)
+        recon_score_n = scatter_add(node_mse, batch) / scatter_add(torch.ones_like(node_mse), batch)
+
+        return score_g, score_n, recon_score_g, recon_score_n
+
+    def mi_loss(self, n, g, batch):
+        # 正样本得分
+        pos_score = self.mi_discriminator(n, g[batch])  # g[batch] 将图表示广播到对应节点
+        # 负样本：打乱 batch 顺序
+        shuffle_idx = torch.randperm(g.size(0))
+        neg_g = g[shuffle_idx][batch]
+        neg_score = self.mi_discriminator(n, neg_g)
+        mi_loss = -F.logsigmoid(pos_score) - F.logsigmoid(-neg_score)
+        return mi_loss
 
     @staticmethod
     def gcl_loss_n(x, x_aug, batch, temperature=0.2):

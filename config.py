@@ -16,7 +16,7 @@ class Config:
     seed: int = 42
 
     # ============== 数据集 ==============
-    ad_dataset: str = "BZR"
+    ad_dataset: str = "AIDS"
     ood_dataset: str = "AIDS+DHFR"
 
     # ============== 模型结构 ==============
@@ -24,7 +24,6 @@ class Config:
     dg_dim: int = 16
     num_layers: int = 5
     hid_dim: int = 64
-    lr: int = 1e-5
     temperature: int = 0.7
     dropout: float = 0.1
     eps: float = 0.001
